@@ -1,0 +1,6 @@
+{
+  "name": "หมู่บ้านจันทร์ทมิฬ — Ultimate Werewolf",
+  "description": "เกมล่ามนุษย์หมาป่า (Ultimate Werewolf) รูปแบบโต้ตอบภาษาไทย พร้อมผู้ดำเนินเกมและผู้เล่น AI 5 คาแรกเตอร์ที่วิเคราะห์ โต้เถียง และบลัฟอย่างมีตรรกะ",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

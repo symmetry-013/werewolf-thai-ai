@@ -1,0 +1,21 @@
+services:
+  - type: web
+    name: ultimate-werewolf-thai
+    runtime: node
+    plan: free
+    buildCommand: npm install && npm run build
+    startCommand: npx tsx server.ts
+    healthCheckPath: /health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: GEMINI_MODEL_PRIMARY
+        value: gemini-2.5-pro
+      - key: GEMINI_MODEL_FAST
+        value: gemini-2.5-flash
+      - key: AI_PROVIDER_ORDER
+        value: gemini,openai,openrouter,groq,deepseek,anthropic
+      - key: AI_MIX_PROVIDERS
+        value: "false"
