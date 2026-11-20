@@ -240,7 +240,8 @@ export const VillageCanvas: React.FC<VillageCanvasProps> = ({
       ctx.scale(dpr, dpr);
 
       const st = stateRef.current;
-      const targetNight = st.phase === 'NIGHT_ACTION' ? 1 : 0.18;
+      const targetNight =
+        st.phase === 'NIGHT_ACTION' ? 1 : st.phase === 'DAY_RESULT' ? 0.55 : 0.18;
       st.nightBlend += (targetNight - st.nightBlend) * Math.min(1, dt * 3.5);
 
       // Camera shake decay
@@ -375,6 +376,8 @@ export const VillageCanvas: React.FC<VillageCanvasProps> = ({
           ? `วันที่ ${st.dayCount} · สภาหมู่บ้าน`
           : st.phase === 'DAY_VOTING'
           ? `วันที่ ${st.dayCount} · ลงมติประหาร`
+          : st.phase === 'DAY_RESULT'
+          ? `วันที่ ${st.dayCount} · สรุปผลและรอเข้ากลางคืน`
           : 'บทสรุปชะตากรรม';
       ctx.fillText(phaseTitle, centerX, centerY + 34);
 

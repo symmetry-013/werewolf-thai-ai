@@ -18,7 +18,10 @@ export type PhaseType =
   | 'NIGHT_ACTION'
   | 'DAY_DISCUSSION'
   | 'DAY_VOTING'
+  | 'DAY_RESULT'
   | 'GAME_OVER';
+
+export const ABSTAIN_VOTE_ID = '__ABSTAIN__';
 
 export interface RoleMetadata {
   id: RoleType;
@@ -429,18 +432,27 @@ export function resolveNightPhase(params: {
   const aliveNonWolves = alive.filter((p) => !isWerewolfTeam(p.role));
   const killCount = doubleKillActive ? 2 : 1;
 
-  const humanWolf = aliveWolves.find(
+  const humanWolvesWithAction = aliveWolves.filter(
     (w) => w.isHuman && humanActions[w.id]?.primary
   );
 
-  if (humanWolf) {
-    const act = humanActions[humanWolf.id];
-    if (act.primary) wolfTargetIds.push(act.primary);
+  if (humanWolvesWithAction.length > 0) {
+    // Prefer agreed target when 2 living human wolves both submitted
+    const primaryChoices = humanWolvesWithAction
+      .map((w) => humanActions[w.id]?.primary)
+      .filter((id): id is string => Boolean(id));
+    const chosenPrimary =
+      primaryChoices.length >= 2 && primaryChoices[0] === primaryChoices[1]
+        ? primaryChoices[0]
+        : primaryChoices[0];
+    const leadAct = humanActions[humanWolvesWithAction[0].id];
+
+    if (chosenPrimary) wolfTargetIds.push(chosenPrimary);
     if (killCount === 2) {
-      if (act.secondary && act.secondary !== act.primary) {
-        wolfTargetIds.push(act.secondary);
+      if (leadAct.secondary && leadAct.secondary !== chosenPrimary) {
+        wolfTargetIds.push(leadAct.secondary);
       } else {
-        const extra = aliveNonWolves.find((p) => p.id !== act.primary);
+        const extra = aliveNonWolves.find((p) => p.id !== chosenPrimary);
         if (extra) wolfTargetIds.push(extra.id);
       }
     }
@@ -889,7 +901,17 @@ export function generateLocalVotes(params: {
 
   for (const h of eligibleHumans) {
     const tId = humanVotesMap[h.id];
-    const targetObj = tId ? aliveAll.find((p) => p.id === tId) : undefined;
+    if (tId === ABSTAIN_VOTE_ID || !tId) {
+      votes.push({
+        voterId: h.id,
+        voterName: h.name,
+        targetId: ABSTAIN_VOTE_ID,
+        targetName: 'งดออกเสียง (ไม่โหวต)',
+        reason: 'เลือกงดออกเสียงเพื่อเก็บไว้ตัดสินใจในวันถัดไป',
+      });
+      continue;
+    }
+    const targetObj = aliveAll.find((p) => p.id === tId);
     if (targetObj) {
       votes.push({
         voterId: h.id,
@@ -995,6 +1017,22 @@ export function generateLocalVotes(params: {
       ]);
     }
 
+    // Allow ordinary villagers a small chance to abstain strategically if evidence is sparse
+    if (
+      ai.role === 'VILLAGER' &&
+      recentTranscript.length < 6 &&
+      Math.random() < 0.14
+    ) {
+      votes.push({
+        voterId: ai.id,
+        voterName: ai.name,
+        targetId: ABSTAIN_VOTE_ID,
+        targetName: 'งดออกเสียง (ไม่โหวต)',
+        reason: 'ข้อมูลวันนี้ยังไม่ชัดเจน ขอเก็บสิทธิ์ไว้ดูท่าทีวันพรุ่งนี้ก่อน',
+      });
+      continue;
+    }
+
     votes.push({
       voterId: ai.id,
       voterName: ai.name,
@@ -1006,3 +1044,240 @@ export function generateLocalVotes(params: {
 
   return votes;
 }
+
+export function generateLocalWolfPartnerReply(params: {
+  aiWolf: Player;
+  humanWolfName: string;
+  players: Player[];
+  humanMessage?: string;
+  humanSignaledTargetId?: string | null;
+  nightNumber: number;
+  mode: 'OPEN_NIGHT' | 'HUMAN_SIGNAL' | 'HUMAN_CHAT';
+}): { text: string; suggestedTargetId: string | null } {
+  const {
+    aiWolf,
+    humanWolfName,
+    players,
+    humanMessage = '',
+    humanSignaledTargetId,
+    nightNumber,
+    mode,
+  } = params;
+
+  const alivePrey = players.filter((p) => p.alive && !isWerewolfTeam(p.role));
+  if (alivePrey.length === 0) {
+    return { text: 'ตอนนี้แทบไม่เหลือเหยื่อแล้ว ลุยปิดเกมกันเลย!', suggestedTargetId: null };
+  }
+
+  // Check if human mentioned a specific living prey by name in chat
+  const mentionedPrey = alivePrey.find(
+    (p) => humanMessage.includes(p.shortName) || humanMessage.includes(p.name)
+  );
+  const signaledPrey = humanSignaledTargetId
+    ? alivePrey.find((p) => p.id === humanSignaledTargetId)
+    : undefined;
+
+  if (mode === 'OPEN_NIGHT') {
+    const sorted = [...alivePrey].sort((a, b) => b.suspicionScore - a.suspicionScore);
+    const pick =
+      sorted[Math.floor(Math.random() * Math.min(3, sorted.length))] || alivePrey[0];
+    const openers = [
+      `เฮ้ ${humanWolfName} คืนที่ ${nightNumber} แล้ว ฉันส่งซิกเล็งไปที่ "${pick.shortName}" ไว้นะ ดูท่าทางน่าจะอ่านเกมเก่ง ถ้าเห็นตรงกันกดล็อก "${pick.shortName}" ด้วยกันเลย หรือถ้าอยากเก็บคนอื่นกดส่งซิกบอกฉันได้เลย!`,
+      `${humanWolfName} คืนนี้เราลองตัด "${pick.shortName}" ออกจากกระดานก่อนดีไหม? ฉันส่งซิกเลือกไว้แล้วนะ แต่ถ้า ${humanWolfName} เล็งใครอยู่กดส่งซิกมาได้เลย ฉันพร้อมปรับตามให้ตรงกัน!`,
+    ];
+    return {
+      text: pickRandom(openers),
+      suggestedTargetId: pick.id,
+    };
+  }
+
+  if (mode === 'HUMAN_SIGNAL' && signaledPrey) {
+    const agreements = [
+      `รับทราบซิก! งั้นฉันเปลี่ยนมาล็อกเป้า "${signaledPrey.shortName}" ให้ตรงกับ ${humanWolfName} เลยนะ ทั้งคู่เห็นตรงกันแล้วกดยืนยันสังหารได้เลย!`,
+      `โอเคเลย ${humanWolfName} เก็บ "${signaledPrey.shortName}" คืนนี้ก็เข้าท่ามาก ฉันส่งซิกล็อก "${signaledPrey.shortName}" ตามแล้ว กดยืนยันได้เลย!`,
+      `จัดไปตามนั้น! ฉันย้ายเป้ามาเป็น "${signaledPrey.shortName}" ให้ตรงกันทั้ง 2 ตัวแล้ว คืนนี้ไม่รอดแน่`,
+    ];
+    return {
+      text: pickRandom(agreements),
+      suggestedTargetId: signaledPrey.id,
+    };
+  }
+
+  // HUMAN_CHAT mode
+  const target = mentionedPrey || signaledPrey || pickRandom(alivePrey);
+  if (mentionedPrey) {
+    return {
+      text: `เห็นด้วยเลย ${humanWolfName}! งั้นคืนนี้เราล็อกเป้า "${mentionedPrey.shortName}" ด้วยกันนะ ฉันส่งซิกไปที่ "${mentionedPrey.shortName}" ให้แล้ว กดเลือกให้ตรงกันได้เลย`,
+      suggestedTargetId: mentionedPrey.id,
+    };
+  }
+
+  const chatReplies = [
+    `เข้าใจแล้ว ${humanWolfName} ตอนนี้ฉันเล็ง "${target.shortName}" ไว้อยู่นะ ถ้าเราตกลงเอาคนนี้ก็กดเลือก "${target.shortName}" ให้ตรงกันทั้งคู่ได้เลย หรืออยากเปลี่ยนคนก็ส่งซิกมาบอกได้เลย!`,
+    `โอเคเลย ฝั่งเรากับ ${humanWolfName} ต้องเนียนๆ ไว้ในตอนเช้า ส่วนคืนนี้ฉันขอส่งซิกไปที่ "${target.shortName}" ก่อน ถ้า ${humanWolfName} เล็งคนอื่นกดส่งซิกมาได้เลย เดี๋ยวฉันกดตามให้ตรงกัน!`,
+  ];
+  return {
+    text: pickRandom(chatReplies),
+    suggestedTargetId: target.id,
+  };
+}
+
+export interface PostGameReaction {
+  speakerId: string;
+  speakerName: string;
+  role: RoleType;
+  alive: boolean;
+  moodTag: string;
+  sentiment: 'praise' | 'roast' | 'shock' | 'proud';
+  text: string;
+}
+
+export function generateLocalPostGameDebrief(params: {
+  winner: 'VILLAGE' | 'WEREWOLF';
+  players: Player[];
+  dayCount: number;
+  seerKnowledge: SeerRecord[];
+  bodyguardKnowledge: BodyguardRecord[];
+}): PostGameReaction[] {
+  const { winner, players, seerKnowledge, bodyguardKnowledge } = params;
+  const aiPlayers = players.filter((p) => !p.isHuman);
+  if (aiPlayers.length === 0) return [];
+
+  const fatherWolf = players.find((p) => p.role === 'WEREWOLF');
+  const wolfCub = players.find((p) => p.role === 'WOLF_CUB');
+  const seer = players.find((p) => p.role === 'SEER');
+  const bodyguard = players.find((p) => p.role === 'BODYGUARD');
+  const humanPlayers = players.filter((p) => p.isHuman);
+  const leadHuman = humanPlayers[0];
+
+  const wolfNames = [fatherWolf?.shortName, wolfCub?.shortName]
+    .filter(Boolean)
+    .join(' กับ ');
+
+  return aiPlayers.map((ai) => {
+    const isWolf = isWerewolfTeam(ai.role);
+    const partner = isWolf
+      ? players.find((p) => p.id !== ai.id && isWerewolfTeam(p.role))
+      : undefined;
+
+    if (isWolf && winner === 'WEREWOLF') {
+      return {
+        speakerId: ai.id,
+        speakerName: ai.name,
+        role: ai.role,
+        alive: ai.alive,
+        moodTag: 'ขิงจัด / หลอกเนียน',
+        sentiment: 'proud',
+        text: partner
+          ? `555 เนียนกริบ! ขอบคุณ ${partner.shortName} ที่ช่วยดึงความสนใจให้${leadHuman && !isWerewolfTeam(leadHuman.role) ? ` ส่วน ${leadHuman.shortName} เกือบจับได้แล้วเชียว แต่สุดท้ายก็หลงกลพวกเราอยู่ดี!` : ' ชาวบ้านรอบนี้หัวหมุนกันหมด!'}`
+          : `บอกแล้วว่าอย่าไว้ใจคนพูดนิ่งๆ รอบนี้ฝูงหมาป่าคุมเกมได้หมดจดจริงๆ!`,
+      };
+    }
+
+    if (isWolf && winner === 'VILLAGE') {
+      return {
+        speakerId: ai.id,
+        speakerName: ai.name,
+        role: ai.role,
+        alive: ai.alive,
+        moodTag: 'ยอมใจ / ชม MVP',
+        sentiment: 'praise',
+        text: `${leadHuman && !isWerewolfTeam(leadHuman.role) ? `ยอมรับเลย ${leadHuman.shortName} อ่านเกมโคตรขาด! ` : ''}พยายามตีเนียนสุดชีวิตแล้วนะ${seer ? ` แต่ ${seer.shortName} (เทพพยากรณ์) ดันเปิดทางไว้แม่นเกิน ต้านไม่ไหวจริงๆ รอบหน้าเอาคืนแน่!` : ' ชาวบ้านรอบนี้สามัคคีเกินต้าน!'}`,
+      };
+    }
+
+    if (ai.role === 'SEER') {
+      const foundWolf = seerKnowledge.find((k) => k.isWerewolf);
+      if (winner === 'VILLAGE') {
+        return {
+          speakerId: ai.id,
+          speakerName: ai.name,
+          role: ai.role,
+          alive: ai.alive,
+          moodTag: 'ภูมิใจ / MVP',
+          sentiment: 'proud',
+          text: foundWolf
+            ? `เห็นมั้ย! ฉันส่องเจอ ${foundWolf.targetName} แล้วพยายามใบ้แทบตาย ดีนะที่ทุกคนช่วยกันเก็บหมาป่าได้ครบ โล่งอกสุดๆ!`
+            : `ส่องเช็กชาวบ้านให้ทีละคนจนวงแคบลง สุดท้ายชนะจนได้ ชื่นชมทุกคนที่ช่วยกันวิเคราะห์เลย!`,
+        };
+      }
+      return {
+        speakerId: ai.id,
+        speakerName: ai.name,
+        role: ai.role,
+        alive: ai.alive,
+        moodTag: 'หัวร้อน / บ่นยับ',
+        sentiment: 'roast',
+        text: `โอ๊ยยย! ฉันเป็นเทพพยากรณ์นะ พยายามส่งสัญญาณเรื่อง ${wolfNames || 'หมาป่า'} แทบตายแต่ไม่มีใครฟังเลย โดนปั่นซะเละเทะ โคตรเสียดาย!`,
+      };
+    }
+
+    if (ai.role === 'BODYGUARD') {
+      const savedSomeone = bodyguardKnowledge.length > 0;
+      if (winner === 'VILLAGE') {
+        return {
+          speakerId: ai.id,
+          speakerName: ai.name,
+          role: ai.role,
+          alive: ai.alive,
+          moodTag: 'ชมทีม / ภูมิใจ',
+          sentiment: 'praise',
+          text: savedSomeone
+            ? `ตอนกลางคืนลุ้นมือสั่นเลยว่าจะกันถูกคนมั้ย ดีใจมากที่ฝ่ายชาวบ้านอ่านเกม ${wolfNames || 'หมาป่า'} ออกและชนะได้สำเร็จ!`
+            : `คุ้มกันสุดตัวแล้วจริงๆ รอบนี้ฝ่ายชาวบ้านเล่นกันคมมาก ชมเลย!`,
+        };
+      }
+      return {
+        speakerId: ai.id,
+        speakerName: ai.name,
+        role: ai.role,
+        alive: ai.alive,
+        moodTag: 'เจ็บใจ / ช็อกจัด',
+        sentiment: 'shock',
+        text: `ห๊ะ?! ${wolfNames || 'คู่นั้น'} เป็นหมาป่าเหรอเนี่ย! ฉันดันไปคุ้มกันผิดฝั่งเฉยเลย เล่นเนียนเกิ๊น ขอคารวะเลยแต่รอบหน้าไม่หลงกลแน่!`,
+      };
+    }
+
+    if (ai.role === 'BEGGAR') {
+      return {
+        speakerId: ai.id,
+        speakerName: ai.name,
+        role: ai.role,
+        alive: ai.alive,
+        moodTag: 'ฮาไม่ไหว / แซวเพื่อน',
+        sentiment: winner === 'VILLAGE' ? 'praise' : 'roast',
+        text: ai.revealedBeggar
+          ? `555 ขำพวกที่โหวตฉันตอนนั้นสุดๆ ฉันเป็นแค่ยาจกเองนะ! พอรู้ว่า ${wolfNames} เป็นหมาป่าแล้วอยากหัวเราะให้ลั่นหมู่บ้าน`
+          : `นั่งดูอยู่เงียบๆ แต่แอบช็อกที่ ${wolfNames} ตีเนียนได้ขนาดนั้น รอบหน้าจัดอีกตาได้เลย!`,
+      };
+    }
+
+    // Villagers: mix of praise, roast, and shock based on match outcome
+    if (winner === 'VILLAGE') {
+      return {
+        speakerId: ai.id,
+        speakerName: ai.name,
+        role: ai.role,
+        alive: ai.alive,
+        moodTag: ai.alive ? 'ชมเปาะ (MVP)' : 'ช็อกตาค้าง',
+        sentiment: ai.alive ? 'praise' : 'shock',
+        text: ai.alive
+          ? `${leadHuman && !isWerewolfTeam(leadHuman.role) ? `ต้องชม ${leadHuman.shortName} เลย จับพิรุธโคตรเก่ง! ` : ''}ตอนแรกเกือบหลงเชื่อ ${wolfNames} แล้วนะเนี่ย ดีนะไหวตัวทันก่อนโดนกินหมด!`
+          : `โดนหมาป่าเก็บไปก่อน นั่งลุ้นจนตัวเกร็ง! พอเห็นเฉลยว่า ${wolfNames} เป็นหมาป่าคือช็อกมาก แต่ดีใจที่เพื่อนๆ แก้แค้นให้สำเร็จ!`,
+      };
+    }
+
+    return {
+      speakerId: ai.id,
+      speakerName: ai.name,
+      role: ai.role,
+      alive: ai.alive,
+      moodTag: ai.alive ? 'บ่นยับ / หัวร้อน' : 'ช็อกตาค้าง',
+      sentiment: ai.alive ? 'roast' : 'shock',
+      text: ai.alive
+        ? `โห ${wolfNames} หลอกกันหน้าตายมาก! ฉันอุตส่าห์ไว้ใจแท้ๆ${bodyguard ? ` ส่วน ${bodyguard.shortName} ก็ช่วยไม่ทัน` : ''} รอบนี้ชาวบ้านโดนปั่นยับเลย หัวร้อนจัด!`
+        : `บอกแล้ววว!! ${wolfNames} มีพิรุธตั้งแต่แรกแต่ไม่มีใครเชื่อฉันเลย สุดท้ายโดนหมาป่ากวาดเรียบ รอบหน้าห้ามพลาดอีกนะ!`,
+    };
+  });
+}
+
