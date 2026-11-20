@@ -12,9 +12,9 @@ services:
       - key: GEMINI_API_KEY
         sync: false
       - key: GEMINI_MODEL_PRIMARY
-        value: gemini-2.5-flash-lite
+        value: gemini-3.8-flash
       - key: GEMINI_MODEL_FAST
-        value: gemini-2.5-flash-lite
+        value: gemini-3.5-flash-lite
       - key: AI_TIMEOUT_MS
         value: "20000"
       - key: AI_PROVIDER_ORDER
