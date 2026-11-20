@@ -171,9 +171,6 @@ export default function App() {
     })
   );
 
-  const [activeHumanId, setActiveHumanId] = useState<string>(() => getOrCreateMyClientId());
-  const [revealIndex, setRevealIndex] = useState<number>(0);
-
   const [phase, setPhase] = useState<PhaseType>('NIGHT_ACTION');
   const [dayCount, setDayCount] = useState<number>(1);
 
@@ -357,7 +354,8 @@ export default function App() {
               }
               if (data.type === 'ROOM_SYNC' && data.gameStarted && data.snapshot) {
                 const snap = data.snapshot;
-                if (Array.isArray(snap.players)) setPlayers(snap.players);
+                const snapPlayers: Player[] = Array.isArray(snap.players) ? snap.players : [];
+                if (snapPlayers.length > 0) setPlayers(snapPlayers);
                 if (snap.phase) setPhase(snap.phase);
                 if (typeof snap.dayCount === 'number') setDayCount(snap.dayCount);
                 if (typeof snap.doubleKillNextNight === 'boolean') {
@@ -370,12 +368,37 @@ export default function App() {
                 if (Array.isArray(snap.messages)) setMessages(snap.messages);
                 if (Array.isArray(snap.votes)) setVotes(snap.votes);
                 if (snap.winSummary) setWinSummary(snap.winSummary);
-                setShellState(snap.shellState === 'GAME_OVER' ? 'GAME_OVER' : 'ROLE_REVEAL');
+                const amInMatch = snapPlayers.some((p) => p.id === myClientId);
+                setHasSubmittedNight(
+                  snap.phase === 'NIGHT_ACTION' &&
+                    Array.isArray(data.nightReadyIds) &&
+                    data.nightReadyIds.includes(myClientId)
+                );
+                setHasSubmittedVote(
+                  snap.phase === 'DAY_VOTING' &&
+                    Array.isArray(data.voteReadyIds) &&
+                    data.voteReadyIds.includes(myClientId)
+                );
+                setShellState(
+                  snap.shellState === 'GAME_OVER'
+                    ? 'GAME_OVER'
+                    : amInMatch
+                    ? 'ROLE_REVEAL'
+                    : 'PLAYING'
+                );
               }
             } else if (data.type === 'GAME_STARTED' && data.snapshot) {
               const snap = data.snapshot;
+              const snapPlayers: Player[] = Array.isArray(snap.players) ? snap.players : [];
               if (data.hostId) setHostId(data.hostId);
-              if (Array.isArray(snap.players)) setPlayers(snap.players);
+              if (Array.isArray(data.participants) && data.participants.length > 0) {
+                setHumanParticipants(
+                  data.participants.map((p: HumanParticipant) =>
+                    p.id === myClientId ? { ...p, name: myNameRef.current } : p
+                  )
+                );
+              }
+              if (snapPlayers.length > 0) setPlayers(snapPlayers);
               if (snap.phase) setPhase(snap.phase);
               if (typeof snap.dayCount === 'number') setDayCount(snap.dayCount);
               setDoubleKillNextNight(Boolean(snap.doubleKillNextNight));
@@ -392,11 +415,12 @@ export default function App() {
               setHasSubmittedNight(false);
               setHasSubmittedVote(false);
               setRoleCardImgError(false);
-              setRevealIndex(0);
-              setShellState('ROLE_REVEAL');
+              const amInMatch = snapPlayers.some((p) => p.id === myClientId);
+              setShellState(amInMatch ? 'ROLE_REVEAL' : 'PLAYING');
               soundFX.playMessagePop(true);
             } else if (data.type === 'GAME_STATE_UPDATED' && data.snapshot) {
               const snap = data.snapshot;
+              if (data.hostId) setHostId(data.hostId);
               if (Array.isArray(snap.players)) setPlayers(snap.players);
               if (snap.phase) setPhase(snap.phase);
               if (typeof snap.dayCount === 'number') setDayCount(snap.dayCount);
@@ -413,18 +437,20 @@ export default function App() {
               if (Array.isArray(snap.messages)) setMessages(snap.messages);
               if (Array.isArray(snap.votes)) setVotes(snap.votes);
               if (snap.winSummary) setWinSummary(snap.winSummary);
-              if (Array.isArray(data.nightReadyIds)) {
-                setNightReadyIds(data.nightReadyIds);
-              } else {
-                setNightReadyIds([]);
-              }
-              if (Array.isArray(data.voteReadyIds)) {
-                setVoteReadyIds(data.voteReadyIds);
-              } else {
-                setVoteReadyIds([]);
-              }
-              setHasSubmittedNight(false);
-              setHasSubmittedVote(false);
+              const nextNightReady: string[] = Array.isArray(data.nightReadyIds)
+                ? data.nightReadyIds
+                : [];
+              const nextVoteReady: string[] = Array.isArray(data.voteReadyIds)
+                ? data.voteReadyIds
+                : [];
+              setNightReadyIds(nextNightReady);
+              setVoteReadyIds(nextVoteReady);
+              setHasSubmittedNight(
+                snap.phase === 'NIGHT_ACTION' && nextNightReady.includes(myClientId)
+              );
+              setHasSubmittedVote(
+                snap.phase === 'DAY_VOTING' && nextVoteReady.includes(myClientId)
+              );
               if (snap.shellState === 'GAME_OVER') {
                 setShellState('GAME_OVER');
               }
@@ -580,9 +606,6 @@ export default function App() {
     if (humanParticipants.length <= 1) return;
     const updated = humanParticipants.filter((p) => p.id !== id);
     setHumanParticipants(updated);
-    if (activeHumanId === id && updated[0]) {
-      setActiveHumanId(updated[0].id);
-    }
     sendWsMessage({
       type: 'UPDATE_LOBBY',
       totalPlayers: totalPlayerCount,
@@ -634,12 +657,6 @@ export default function App() {
     URL.revokeObjectURL(url);
   };
 
-  // All human players in the current match
-  const humanPlayersList = useMemo(
-    () => players.filter((p) => p.isHuman),
-    [players]
-  );
-
   // Number of real humans currently connected online via separate browsers/devices
   const onlineHumansList = useMemo(
     () => humanParticipants.filter((hp) => hp.isOnline),
@@ -648,60 +665,32 @@ export default function App() {
   const isMultiDeviceOnline = wsConnected && onlineHumansList.length > 1;
   const isHost = !hostId || hostId === myClientId;
 
-  // Currently active/viewing human player
-  const humanPlayer = useMemo(() => {
-    // In multi-device online mode, ALWAYS lock view to this device's own player so nobody peeks at friends' cards!
-    if (isMultiDeviceOnline) {
-      return (
-        players.find((p) => p.id === myClientId) ||
-        players.find((p) => p.isHuman) ||
-        players[0]
-      );
-    }
-    return (
-      players.find((p) => p.id === activeHumanId) ||
-      players.find((p) => p.id === myClientId) ||
-      players.find((p) => p.isHuman) ||
-      players[0]
-    );
-  }, [players, activeHumanId, myClientId, isMultiDeviceOnline]);
-
-  useEffect(() => {
-    if (!players.some((p) => p.id === activeHumanId && p.isHuman)) {
-      const meInGame = players.find((p) => p.id === myClientId && p.isHuman);
-      const firstHuman = players.find((p) => p.isHuman);
-      if (meInGame) {
-        setActiveHumanId(meInGame.id);
-      } else if (firstHuman) {
-        setActiveHumanId(firstHuman.id);
-      }
-    }
-  }, [players, activeHumanId, myClientId]);
+  // STRICT PRIVACY: Each device/browser ONLY EVER sees its own player (by myClientId) — zero fallback to Host/other players!
+  const myPlayer = useMemo(
+    () => players.find((p) => p.id === myClientId) || null,
+    [players, myClientId]
+  );
 
   const fellowWolves = useMemo(() => {
-    if (!isWerewolfTeam(humanPlayer.role)) return [];
+    if (!myPlayer || !isWerewolfTeam(myPlayer.role)) return [];
     return players.filter(
-      (p) => p.id !== humanPlayer.id && isWerewolfTeam(p.role)
+      (p) => p.id !== myPlayer.id && isWerewolfTeam(p.role)
     );
-  }, [humanPlayer, players]);
+  }, [myPlayer, players]);
 
   const seerKnownMap = useMemo(() => {
     const map: Record<string, boolean> = {};
-    if (humanPlayer.role === 'SEER') {
+    if (myPlayer && myPlayer.role === 'SEER') {
       seerKnowledge.forEach((rec) => {
         map[rec.targetId] = rec.isWerewolf;
       });
     }
     return map;
-  }, [humanPlayer.role, seerKnowledge]);
+  }, [myPlayer, seerKnowledge]);
 
   const alivePlayers = useMemo(() => players.filter((p) => p.alive), [players]);
   const aliveAICount = useMemo(
     () => alivePlayers.filter((p) => !p.isHuman).length,
-    [alivePlayers]
-  );
-  const aliveWolvesCount = useMemo(
-    () => alivePlayers.filter((p) => isWerewolfTeam(p.role)).length,
     [alivePlayers]
   );
 
@@ -859,7 +848,6 @@ export default function App() {
     setWinSummary({ winner: null, reasonThai: '' });
     setRoleCardImgError(false);
     setMessages(initialMsgs);
-    setRevealIndex(0);
 
     setShellState('ROLE_REVEAL');
     soundFX.playMessagePop(true);
@@ -905,29 +893,32 @@ export default function App() {
   );
 
   const visibleMessages = useMemo(() => {
-    return messages.filter(
-      (m) => !m.visibleToPlayerId || m.visibleToPlayerId === humanPlayer.id
-    );
-  }, [messages, humanPlayer.id]);
+    return messages.filter((m) => {
+      if (m.isSecret || m.senderId === 'secret') {
+        return Boolean(myPlayer && m.visibleToPlayerId === myPlayer.id);
+      }
+      return true;
+    });
+  }, [messages, myPlayer]);
 
   useEffect(() => {
     chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [visibleMessages, isGeneratingAI]);
 
   useEffect(() => {
-    if (shellState !== 'PLAYING' || !humanPlayer.alive) return;
+    if (shellState !== 'PLAYING' || !myPlayer || !myPlayer.alive) return;
 
     if (
       phase === 'NIGHT_ACTION' &&
-      (isWerewolfTeam(humanPlayer.role) ||
-        humanPlayer.role === 'SEER' ||
-        humanPlayer.role === 'BODYGUARD')
+      (isWerewolfTeam(myPlayer.role) ||
+        myPlayer.role === 'SEER' ||
+        myPlayer.role === 'BODYGUARD')
     ) {
       const validList = players.filter((p) => {
         if (!p.alive) return false;
-        if (isWerewolfTeam(humanPlayer.role)) return !isWerewolfTeam(p.role);
-        if (humanPlayer.role === 'SEER') return p.id !== humanPlayer.id;
-        if (humanPlayer.role === 'BODYGUARD') return p.id !== lastProtectedId;
+        if (isWerewolfTeam(myPlayer.role)) return !isWerewolfTeam(p.role);
+        if (myPlayer.role === 'SEER') return p.id !== myPlayer.id;
+        if (myPlayer.role === 'BODYGUARD') return p.id !== lastProtectedId;
         return false;
       });
       if (!selectedTargetId && validList[0]) {
@@ -935,7 +926,7 @@ export default function App() {
       }
       if (
         doubleKillNextNight &&
-        isWerewolfTeam(humanPlayer.role) &&
+        isWerewolfTeam(myPlayer.role) &&
         !secondTargetId &&
         validList.length > 1
       ) {
@@ -944,10 +935,10 @@ export default function App() {
         );
         if (second) setSecondTargetId(second.id);
       }
-    } else if (phase === 'DAY_VOTING' && humanPlayer.canVote) {
+    } else if (phase === 'DAY_VOTING' && myPlayer.canVote) {
       if (!selectedTargetId) {
         const firstValidVote = players.find(
-          (p) => p.alive && p.id !== humanPlayer.id && !p.revealedBeggar
+          (p) => p.alive && p.id !== myPlayer.id && !p.revealedBeggar
         );
         if (firstValidVote) {
           setSelectedTargetId(firstValidVote.id);
@@ -957,7 +948,7 @@ export default function App() {
   }, [
     shellState,
     phase,
-    humanPlayer,
+    myPlayer,
     players,
     selectedTargetId,
     secondTargetId,
@@ -1004,7 +995,7 @@ export default function App() {
         return;
       }
 
-      if (!isInputFocused && e.key === 'Tab') {
+      if (!isInputFocused && e.key === 'Tab' && myPlayer) {
         e.preventDefault();
         setShowRoleCardModal((prev) => !prev);
       }
@@ -1020,7 +1011,7 @@ export default function App() {
       window.removeEventListener('keydown', handleKeyDown);
       window.removeEventListener('blur', handleBlur);
     };
-  }, [shellState, startNewRandomGame, showRoleCardModal, showDownloadModal]);
+  }, [shellState, startNewRandomGame, showRoleCardModal, showDownloadModal, myPlayer]);
 
   const toggleMute = () => {
     const next = !muted;
@@ -1031,35 +1022,36 @@ export default function App() {
   const isTargetSelectable = useCallback(
     (target: Player): boolean => {
       if (!target.alive) return false;
-      if (!humanPlayer.alive) return false;
+      if (!myPlayer || !myPlayer.alive) return false;
 
       if (phase === 'NIGHT_ACTION') {
-        if (humanPlayer.role === 'VILLAGER' || humanPlayer.role === 'BEGGAR') {
+        if (myPlayer.role === 'VILLAGER' || myPlayer.role === 'BEGGAR') {
           return false;
         }
-        if (isWerewolfTeam(humanPlayer.role)) {
+        if (isWerewolfTeam(myPlayer.role)) {
           return !isWerewolfTeam(target.role);
         }
-        if (humanPlayer.role === 'SEER') {
-          return target.id !== humanPlayer.id;
+        if (myPlayer.role === 'SEER') {
+          return target.id !== myPlayer.id;
         }
-        if (humanPlayer.role === 'BODYGUARD') {
+        if (myPlayer.role === 'BODYGUARD') {
           return target.id !== lastProtectedId;
         }
       }
 
       if (phase === 'DAY_VOTING') {
-        if (!humanPlayer.canVote) return false;
-        return target.id !== humanPlayer.id;
+        if (!myPlayer.canVote) return false;
+        return target.id !== myPlayer.id;
       }
 
       return true;
     },
-    [humanPlayer, phase, lastProtectedId]
+    [myPlayer, phase, lastProtectedId]
   );
 
   const handleSelectPlayerOnCanvas = useCallback(
     (playerId: string) => {
+      if (!myPlayer) return;
       const target = players.find((p) => p.id === playerId);
       if (!target) return;
       if (!isTargetSelectable(target) && phase !== 'DAY_DISCUSSION') return;
@@ -1067,7 +1059,7 @@ export default function App() {
       if (
         phase === 'NIGHT_ACTION' &&
         doubleKillNextNight &&
-        isWerewolfTeam(humanPlayer.role)
+        isWerewolfTeam(myPlayer.role)
       ) {
         if (selectedTargetId === playerId) return;
         if (!selectedTargetId) {
@@ -1083,11 +1075,11 @@ export default function App() {
       soundFX.playMessagePop(false);
     },
     [
+      myPlayer,
       players,
       isTargetSelectable,
       phase,
       doubleKillNextNight,
-      humanPlayer.role,
       selectedTargetId,
       secondTargetId,
     ]
@@ -1138,6 +1130,7 @@ export default function App() {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
+            roomId,
             dayNumber: currentDay,
             players: updatedPlayers,
             nightVictimNames: victimPlayers.map((v) => v.name),
@@ -1195,7 +1188,7 @@ export default function App() {
           setActiveSpeakerId(speaker?.id || line.speakerId);
           soundFX.playMessagePop(false);
           setMessages((prev) => [...prev, msgObj]);
-        }, idx * 420);
+        }, idx * 180);
       });
 
       setTimeout(() => {
@@ -1213,9 +1206,9 @@ export default function App() {
           winSummary: { winner: null, reasonThai: '' },
           shellState: 'PLAYING',
         });
-      }, aiLines.length * 420 + 400);
+      }, aiLines.length * 180 + 180);
     },
-    [broadcastGameState]
+    [broadcastGameState, roomId]
   );
 
   // Let AI players continue analyzing and debating among themselves
@@ -1240,6 +1233,7 @@ export default function App() {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
+          roomId,
           dayNumber: dayCount,
           players,
           seerKnowledge,
@@ -1297,7 +1291,7 @@ export default function App() {
         setActiveSpeakerId(speaker?.id || line.speakerId);
         soundFX.playMessagePop(false);
         setMessages((prev) => [...prev, msgObj]);
-      }, idx * 400);
+      }, idx * 180);
     });
 
     setTimeout(() => {
@@ -1315,7 +1309,7 @@ export default function App() {
         winSummary,
         shellState: 'PLAYING',
       });
-    }, aiLines.length * 400 + 350);
+    }, aiLines.length * 180 + 180);
   };
 
   // Core Night Resolution (called immediately in solo mode, or when all online friends submit)
@@ -1436,6 +1430,23 @@ export default function App() {
 
       setPhase('DAY_DISCUSSION');
       soundFX.playDayTransition();
+
+      // INSTANT DAWN BROADCAST: Move ALL connected friends to Day Discussion immediately (<100ms)
+      // instead of blocking them on the Night screen while AI generates dialogue!
+      broadcastGameState({
+        players: updatedPlayers,
+        phase: 'DAY_DISCUSSION',
+        dayCount,
+        doubleKillNextNight: outcome.cubDiedTonight,
+        lastProtectedId: nextLastProtected,
+        seerKnowledge: nextSeer,
+        bodyguardKnowledge: nextBg,
+        messages: nextMessages,
+        votes,
+        winSummary: { winner: null, reasonThai: '' },
+        shellState: 'PLAYING',
+      });
+
       await triggerDayDiscussion(
         dayCount,
         updatedPlayers,
@@ -1467,15 +1478,16 @@ export default function App() {
 
   // Player clicks Confirm Night Action
   const handleConfirmNightAction = async () => {
+    if (!myPlayer) return;
     const needsTarget =
-      humanPlayer.alive &&
-      (isWerewolfTeam(humanPlayer.role) ||
-        humanPlayer.role === 'SEER' ||
-        humanPlayer.role === 'BODYGUARD');
+      myPlayer.alive &&
+      (isWerewolfTeam(myPlayer.role) ||
+        myPlayer.role === 'SEER' ||
+        myPlayer.role === 'BODYGUARD');
 
     if (needsTarget && !selectedTargetId) return;
 
-    soundFX.playNightAction(humanPlayer.role);
+    soundFX.playNightAction(myPlayer.role);
 
     const myAction = {
       primary: selectedTargetId,
@@ -1486,27 +1498,28 @@ export default function App() {
       setHasSubmittedNight(true);
       sendWsMessage({
         type: 'SUBMIT_NIGHT_ACTION',
-        playerId: humanPlayer.id,
+        playerId: myPlayer.id,
         nightAction: myAction,
       });
       return;
     }
 
     await executeNightResolution({
-      [humanPlayer.id]: myAction,
+      [myPlayer.id]: myAction,
     });
   };
 
   // Human sends a message during Day Discussion -> Broadcast to real friends + AI replies (if any AI alive)
   const handleSendHumanStatement = async (customText?: string) => {
+    if (!myPlayer) return;
     const textToSend = (customText ?? humanInput).trim();
     if (!textToSend || isGeneratingAI) return;
     if (!customText) setHumanInput('');
 
     const myMsg: ChatMessage = {
-      id: `human-msg-${humanPlayer.id}-${Date.now()}`,
-      senderId: humanPlayer.id,
-      senderName: humanPlayer.name,
+      id: `human-msg-${myPlayer.id}-${Date.now()}`,
+      senderId: myPlayer.id,
+      senderName: myPlayer.name,
       text: textToSend,
       phaseLabel: `วันที่ ${dayCount} · ถกเถียง`,
       timestamp: formatTime(),
@@ -1543,6 +1556,7 @@ export default function App() {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
+          roomId,
           dayNumber: dayCount,
           players,
           seerKnowledge,
@@ -1550,7 +1564,7 @@ export default function App() {
           recentTranscript,
           previousVotes: votes,
           humanMessage: textToSend,
-          speakerName: humanPlayer.name,
+          speakerName: myPlayer.name,
           mode: 'REPLY_TO_HUMAN',
         }),
       });
@@ -1569,7 +1583,7 @@ export default function App() {
     if (replies.length === 0) {
       replies = generateLocalReplyToHuman({
         players,
-        speakerName: humanPlayer.shortName,
+        speakerName: myPlayer.shortName,
         humanMessage: textToSend,
         seerKnowledge,
       });
@@ -1599,7 +1613,7 @@ export default function App() {
         setActiveSpeakerId(speaker?.id || rep.speakerId);
         soundFX.playMessagePop(false);
         setMessages((prev) => [...prev, msgObj]);
-      }, idx * 380);
+      }, idx * 180);
     });
 
     setTimeout(() => {
@@ -1617,7 +1631,7 @@ export default function App() {
         winSummary,
         shellState: 'PLAYING',
       });
-    }, replies.length * 380 + 350);
+    }, replies.length * 180 + 180);
   };
 
   // Start Day Voting Phase
@@ -1693,6 +1707,7 @@ export default function App() {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
+              roomId,
               dayNumber: dayCount,
               players,
               seerKnowledge,
@@ -1924,6 +1939,7 @@ export default function App() {
       doubleKillNextNight,
       lastProtectedId,
       winSummary,
+      roomId,
       broadcastGameState,
     ]
   );
@@ -1931,41 +1947,26 @@ export default function App() {
   executeVoteResolveRef.current = executeVoteResolution;
 
   const handleConfirmVote = async () => {
-    if (humanPlayer.alive && humanPlayer.canVote && !selectedTargetId) return;
+    if (!myPlayer) return;
+    if (myPlayer.alive && myPlayer.canVote && !selectedTargetId) return;
 
     if (isMultiDeviceOnline && onlineEligibleHumanVoters.length > 1) {
       setHasSubmittedVote(true);
       sendWsMessage({
         type: 'SUBMIT_DAY_VOTE',
-        playerId: humanPlayer.id,
+        playerId: myPlayer.id,
         voteTargetId:
-          humanPlayer.alive && humanPlayer.canVote ? selectedTargetId : null,
+          myPlayer.alive && myPlayer.canVote ? selectedTargetId : null,
       });
       return;
     }
 
     const soloVotes: Record<string, string> = {};
-    if (humanPlayer.alive && humanPlayer.canVote && selectedTargetId) {
-      soloVotes[humanPlayer.id] = selectedTargetId;
+    if (myPlayer.alive && myPlayer.canVote && selectedTargetId) {
+      soloVotes[myPlayer.id] = selectedTargetId;
     }
     await executeVoteResolution(soloVotes);
   };
-
-  const revealTargetPlayer = useMemo(() => {
-    if (isMultiDeviceOnline) {
-      return players.find((p) => p.id === myClientId) || humanPlayer;
-    }
-    const myMatch = players.find((p) => p.id === myClientId && p.isHuman);
-    if (humanPlayersList.length <= 1 && myMatch) return myMatch;
-    return humanPlayersList[revealIndex] || myMatch || humanPlayer;
-  }, [players, myClientId, humanPlayersList, revealIndex, humanPlayer, isMultiDeviceOnline]);
-
-  const revealPartnerWolves = useMemo(() => {
-    if (!revealTargetPlayer || !isWerewolfTeam(revealTargetPlayer.role)) return [];
-    return players.filter(
-      (p) => p.id !== revealTargetPlayer.id && isWerewolfTeam(p.role)
-    );
-  }, [revealTargetPlayer, players]);
 
   return (
     <div className="relative w-screen h-screen overflow-hidden bg-[#070C18] text-slate-100 select-none">
@@ -1975,7 +1976,7 @@ export default function App() {
           phase={phase}
           dayCount={dayCount}
           players={players}
-          viewerPlayerId={humanPlayer.id}
+          viewerPlayerId={myPlayer?.id || ''}
           selectedTargetId={selectedTargetId}
           secondTargetId={secondTargetId}
           activeSpeakerId={activeSpeakerId}
@@ -2400,8 +2401,8 @@ export default function App() {
         </div>
       )}
 
-      {/* 2B. ROLE CARD REVEAL SCREEN (SHOWN IMMEDIATELY AFTER CLICKING START GAME) */}
-      {shellState === 'ROLE_REVEAL' && revealTargetPlayer && (
+      {/* 2B. ROLE CARD REVEAL SCREEN (STRICTLY SHOWS ONLY THIS DEVICE'S OWN ROLE CARD) */}
+      {shellState === 'ROLE_REVEAL' && myPlayer && (
         <div className="absolute inset-0 z-40 flex items-center justify-center p-4 bg-black/85 pointer-events-auto overflow-y-auto">
           <div className="bg-[#0B1324] border-2 border-amber-500/60 rounded-2xl max-w-lg w-full p-6 space-y-5 shadow-[0_0_50px_rgba(245,158,11,0.25)] my-auto">
             <div className="text-center space-y-1">
@@ -2410,44 +2411,19 @@ export default function App() {
                 <span>ผลการสุ่มการ์ดบทบาทประจำตัวของคุณ</span>
               </div>
               <h2 className="text-2xl md:text-3xl font-bold text-white">
-                ผู้เล่น: <span className="text-amber-300">{revealTargetPlayer.name}</span>
+                ผู้เล่น: <span className="text-amber-300">{myPlayer.name}</span>
               </h2>
               <p className="text-xs text-slate-400">
                 โปรดจำบทบาทของคุณไว้เป็นความลับ ห้ามให้ผู้เล่นคนอื่นล่วงรู้เด็ดขาด!
               </p>
             </div>
 
-            {!isMultiDeviceOnline && humanPlayersList.length > 1 && (
-              <div className="flex flex-wrap items-center justify-center gap-1.5 bg-[#0F172A] p-2 rounded-xl border border-slate-800">
-                <span className="text-[11px] text-slate-400 mr-1">
-                  ดูการ์ดของผู้เล่น:
-                </span>
-                {humanPlayersList.map((hp, i) => (
-                  <button
-                    key={hp.id}
-                    type="button"
-                    onClick={() => {
-                      setRevealIndex(i);
-                      setRoleCardImgError(false);
-                    }}
-                    className={`px-2.5 py-1 rounded-lg text-xs font-bold cursor-pointer transition-colors ${
-                      revealTargetPlayer.id === hp.id
-                        ? 'bg-amber-400 text-slate-950'
-                        : 'bg-slate-800 text-slate-300 hover:bg-slate-700'
-                    }`}
-                  >
-                    {hp.name}
-                  </button>
-                ))}
-              </div>
-            )}
-
             {/* Dealt Role Card Artwork & Frame */}
             <div className="relative aspect-[3/4] w-60 md:w-64 mx-auto rounded-2xl overflow-hidden border-2 border-amber-400/70 bg-slate-900 shadow-[0_12px_35px_rgba(0,0,0,0.75)]">
               {!roleCardImgError ? (
                 <img
-                  src={ROLE_INFO[revealTargetPlayer.role].image}
-                  alt={`การ์ดบทบาท ${ROLE_INFO[revealTargetPlayer.role].thaiName}`}
+                  src={ROLE_INFO[myPlayer.role].image}
+                  alt={`การ์ดบทบาท ${ROLE_INFO[myPlayer.role].thaiName}`}
                   referrerPolicy="no-referrer"
                   onError={() => setRoleCardImgError(true)}
                   className="w-full h-full object-cover"
@@ -2456,10 +2432,10 @@ export default function App() {
                 <div className="w-full h-full flex flex-col items-center justify-center p-6 text-center bg-gradient-to-b from-slate-800 to-slate-950">
                   <Shield className="w-14 h-14 text-amber-400 mb-3" />
                   <span className="font-bold text-xl text-white">
-                    {ROLE_INFO[revealTargetPlayer.role].thaiName}
+                    {ROLE_INFO[myPlayer.role].thaiName}
                   </span>
                   <span className="text-xs text-slate-400 mt-1">
-                    {ROLE_INFO[revealTargetPlayer.role].teamThai}
+                    {ROLE_INFO[myPlayer.role].teamThai}
                   </span>
                 </div>
               )}
@@ -2467,15 +2443,15 @@ export default function App() {
               <div className="absolute inset-x-0 bottom-0 bg-gradient-to-t from-black/95 via-black/80 to-transparent p-4 text-center">
                 <p
                   className="text-xs font-bold tracking-wider uppercase"
-                  style={{ color: ROLE_INFO[revealTargetPlayer.role].accentColor }}
+                  style={{ color: ROLE_INFO[myPlayer.role].accentColor }}
                 >
-                  {ROLE_INFO[revealTargetPlayer.role].teamThai}
+                  {ROLE_INFO[myPlayer.role].teamThai}
                 </p>
                 <h3 className="text-xl font-bold text-white">
-                  {ROLE_INFO[revealTargetPlayer.role].thaiName}
+                  {ROLE_INFO[myPlayer.role].thaiName}
                 </h3>
                 <p className="text-[11px] text-slate-300 font-mono">
-                  {ROLE_INFO[revealTargetPlayer.role].englishName}
+                  {ROLE_INFO[myPlayer.role].englishName}
                 </p>
               </div>
             </div>
@@ -2484,11 +2460,11 @@ export default function App() {
               <div className="font-bold text-amber-300">
                 ความสามารถและหน้าที่ของคุณ:
               </div>
-              <p>{ROLE_INFO[revealTargetPlayer.role].summary}</p>
-              {revealPartnerWolves.length > 0 && (
+              <p>{ROLE_INFO[myPlayer.role].summary}</p>
+              {fellowWolves.length > 0 && (
                 <div className="pt-2 border-t border-slate-800 text-red-400 font-bold">
                   🐺 เพื่อนร่วมฝูงหมาป่าของคุณในกระดานนี้คือ:{' '}
-                  {revealPartnerWolves
+                  {fellowWolves
                     .map((w) => `${w.name} (${ROLE_INFO[w.role].thaiName})`)
                     .join(', ')}
                 </div>
@@ -2498,7 +2474,6 @@ export default function App() {
             <button
               type="button"
               onClick={() => {
-                setActiveHumanId(revealTargetPlayer.id);
                 setShellState('PLAYING');
                 soundFX.playNightTransition();
               }}
@@ -2558,44 +2533,25 @@ export default function App() {
               </div>
 
               <div className="flex items-center gap-2 flex-wrap">
-                {!isMultiDeviceOnline && humanPlayersList.length > 1 && (
-                  <div className="flex items-center gap-1 bg-slate-900 border border-slate-700 rounded-lg px-2 py-1 text-xs">
-                    <span className="text-slate-400">มุมมอง:</span>
-                    <select
-                      value={humanPlayer.id}
-                      onChange={(e) => {
-                        setActiveHumanId(e.target.value);
-                        setSelectedTargetId(null);
-                        setSecondTargetId(null);
-                      }}
-                      className="bg-transparent text-amber-300 font-bold outline-none cursor-pointer"
-                    >
-                      {humanPlayersList.map((hp) => (
-                        <option
-                          key={hp.id}
-                          value={hp.id}
-                          className="bg-slate-900 text-white"
-                        >
-                          {hp.name}
-                        </option>
-                      ))}
-                    </select>
-                  </div>
-                )}
-
-                <button
-                  onClick={() => {
-                    setRoleCardImgError(false);
-                    setShowRoleCardModal(true);
-                  }}
-                  className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold rounded-lg bg-slate-800 hover:bg-slate-700 text-amber-300 border border-amber-500/30 transition-colors cursor-pointer whitespace-nowrap shrink-0"
-                >
-                  <Eye className="w-3.5 h-3.5" />
-                  <span>
-                    การ์ดของ {humanPlayer.shortName}:{' '}
-                    {ROLE_INFO[humanPlayer.role].thaiName}
+                {myPlayer ? (
+                  <button
+                    onClick={() => {
+                      setRoleCardImgError(false);
+                      setShowRoleCardModal(true);
+                    }}
+                    className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold rounded-lg bg-slate-800 hover:bg-slate-700 text-amber-300 border border-amber-500/30 transition-colors cursor-pointer whitespace-nowrap shrink-0"
+                  >
+                    <Eye className="w-3.5 h-3.5" />
+                    <span>
+                      การ์ดของ {myPlayer.shortName}:{' '}
+                      {ROLE_INFO[myPlayer.role].thaiName}
+                    </span>
+                  </button>
+                ) : (
+                  <span className="px-3 py-1.5 text-xs font-semibold rounded-lg bg-slate-900 text-slate-300 border border-slate-700 whitespace-nowrap shrink-0">
+                    โหมดผู้ชม (รอจบรอบนี้)
                   </span>
-                </button>
+                )}
 
                 <button
                   onClick={handleCopyInviteLink}
@@ -2682,7 +2638,7 @@ export default function App() {
                         selectedTargetId === p.id || secondTargetId === p.id;
                       const isFellow = fellowWolves.some((w) => w.id === p.id);
                       const seerStat = seerKnownMap[p.id];
-                      const isCurrentViewer = p.id === humanPlayer.id;
+                      const isCurrentViewer = Boolean(myPlayer && p.id === myPlayer.id);
 
                       return (
                         <button
@@ -2767,7 +2723,7 @@ export default function App() {
                   {visibleMessages.map((m) => {
                     const isMod = m.senderId === 'moderator';
                     const isSecret = m.senderId === 'secret' || m.isSecret;
-                    const isMe = m.senderId === humanPlayer.id;
+                    const isMe = Boolean(myPlayer && m.senderId === myPlayer.id);
 
                     return (
                       <div
@@ -2831,7 +2787,11 @@ export default function App() {
                   {/* PHASE 1: NIGHT ACTION CONTROLS */}
                   {phase === 'NIGHT_ACTION' && (
                     <div className="space-y-2.5">
-                      {hasSubmittedNight && isMultiDeviceOnline ? (
+                      {!myPlayer ? (
+                        <div className="p-3 rounded-lg bg-slate-900 border border-slate-700 text-xs text-slate-300 text-center">
+                          โหมดผู้ชม — เกมรอบนี้กำลังดำเนินอยู่ คุณจะเข้าร่วมเป็นผู้เล่นคนจริงอัตโนมัติในรอบถัดไป
+                        </div>
+                      ) : hasSubmittedNight && isMultiDeviceOnline ? (
                         <div className="space-y-2">
                           <div className="p-3 rounded-lg bg-emerald-950/40 border border-emerald-500/40 text-xs text-emerald-200 text-center">
                             บันทึกแอ็กชันคืนที่ {dayCount} ของคุณแล้ว · รอเพื่อนในห้องยืนยัน ({nightReadyIds.length}/{onlineAliveHumans.length} คน)
@@ -2842,7 +2802,7 @@ export default function App() {
                               onClick={() =>
                                 sendWsMessage({
                                   type: 'FORCE_RESOLVE_NIGHT',
-                                  playerId: humanPlayer.id,
+                                  playerId: myPlayer.id,
                                   nightAction: {
                                     primary: selectedTargetId,
                                     secondary: secondTargetId,
@@ -2855,20 +2815,20 @@ export default function App() {
                             </button>
                           )}
                         </div>
-                      ) : !humanPlayer.alive ? (
+                      ) : !myPlayer.alive ? (
                         <button
                           onClick={handleConfirmNightAction}
                           className="w-full py-2.5 px-4 rounded-lg bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-sm transition-colors cursor-pointer"
                         >
-                          ดำเนินการผ่านคืนที่ {dayCount} ({humanPlayer.name} เสียชีวิตแล้ว)
+                          ดำเนินการผ่านคืนที่ {dayCount} ({myPlayer.name} เสียชีวิตแล้ว)
                         </button>
-                      ) : humanPlayer.role === 'VILLAGER' ||
-                        humanPlayer.role === 'BEGGAR' ? (
+                      ) : myPlayer.role === 'VILLAGER' ||
+                        myPlayer.role === 'BEGGAR' ? (
                         <div className="space-y-2">
                           <p className="text-xs text-slate-300">
-                            {humanPlayer.name} คือ{' '}
+                            {myPlayer.name} คือ{' '}
                             <span className="text-amber-300 font-semibold">
-                              {ROLE_INFO[humanPlayer.role].thaiName}
+                              {ROLE_INFO[myPlayer.role].thaiName}
                             </span>{' '}
                             ในยามวิกาลไม่มีแอ็กชันพิเศษ กดเข้านอนเพื่อรอฟังผลในเช้าวันพรุ่งนี้
                           </p>
@@ -2884,13 +2844,13 @@ export default function App() {
                         <div className="space-y-2">
                           <div className="flex items-center justify-between text-xs">
                             <span className="text-amber-300 font-semibold">
-                              {isWerewolfTeam(humanPlayer.role) &&
+                              {isWerewolfTeam(myPlayer.role) &&
                                 (doubleKillNextNight
                                   ? '🔥 คืนล้างแค้นลูกหมาป่า! คลิกเลือกเหยื่อ 2 คนที่ต้องการสังหาร:'
                                   : 'เลือกเหยื่อ 1 คนที่ฝูงหมาป่าต้องการสังหารในคืนนี้:')}
-                              {humanPlayer.role === 'SEER' &&
+                              {myPlayer.role === 'SEER' &&
                                 'เลือกผู้เล่น 1 คนที่เทพพยากรณ์ต้องการส่องดูบทบาท:'}
-                              {humanPlayer.role === 'BODYGUARD' &&
+                              {myPlayer.role === 'BODYGUARD' &&
                                 'เลือกผู้เล่น 1 คนที่บอดี้การ์ดต้องการคุ้มกันในคืนนี้:'}
                             </span>
                           </div>
@@ -2946,67 +2906,79 @@ export default function App() {
                   {/* PHASE 2: DAY DISCUSSION CONTROLS */}
                   {phase === 'DAY_DISCUSSION' && (
                     <div className="space-y-2">
-                      {humanPlayer.alive && (
-                        <form
-                          onSubmit={(e) => {
-                            e.preventDefault();
-                            handleSendHumanStatement();
-                          }}
-                          className="flex items-center gap-2"
-                        >
-                          <input
-                            type="text"
-                            value={humanInput}
-                            onChange={(e) => setHumanInput(e.target.value)}
-                            placeholder={`พิมพ์พูดคุย ถามจี้ หรือวิเคราะห์ในชื่อ "${humanPlayer.name}"...`}
-                            disabled={isGeneratingAI}
-                            className="flex-1 bg-slate-900 border border-slate-700 focus:border-amber-400 rounded-lg px-3 py-2 text-xs md:text-sm text-white placeholder:text-slate-500 outline-none select-text"
-                          />
-                          <button
-                            type="submit"
-                            disabled={!humanInput.trim() || isGeneratingAI}
-                            className="px-3.5 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 disabled:opacity-40 text-amber-300 font-semibold text-xs flex items-center gap-1.5 transition-colors cursor-pointer shrink-0"
+                      {!myPlayer ? (
+                        <div className="p-3 rounded-lg bg-slate-900 border border-slate-700 text-xs text-slate-300 text-center">
+                          โหมดผู้ชม — กำลังรับชมวงสนทนาของสภาหมู่บ้าน (คุณจะได้เข้าร่วมในรอบถัดไป)
+                        </div>
+                      ) : (
+                        <>
+                          {myPlayer.alive && (
+                            <form
+                              onSubmit={(e) => {
+                                e.preventDefault();
+                                handleSendHumanStatement();
+                              }}
+                              className="flex items-center gap-2"
+                            >
+                              <input
+                                type="text"
+                                value={humanInput}
+                                onChange={(e) => setHumanInput(e.target.value)}
+                                placeholder={`พิมพ์พูดคุย ถามจี้ หรือวิเคราะห์ในชื่อ "${myPlayer.name}"...`}
+                                disabled={isGeneratingAI}
+                                className="flex-1 bg-slate-900 border border-slate-700 focus:border-amber-400 rounded-lg px-3 py-2 text-xs md:text-sm text-white placeholder:text-slate-500 outline-none select-text"
+                              />
+                              <button
+                                type="submit"
+                                disabled={!humanInput.trim() || isGeneratingAI}
+                                className="px-3.5 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 disabled:opacity-40 text-amber-300 font-semibold text-xs flex items-center gap-1.5 transition-colors cursor-pointer shrink-0"
+                              >
+                                <Send className="w-3.5 h-3.5" />
+                                <span>ส่งข้อความ</span>
+                              </button>
+                            </form>
+                          )}
+
+                          <div
+                            className={`grid gap-2 ${
+                              aliveAICount > 0 ? 'grid-cols-1 sm:grid-cols-2' : 'grid-cols-1'
+                            }`}
                           >
-                            <Send className="w-3.5 h-3.5" />
-                            <span>ส่งข้อความ</span>
-                          </button>
-                        </form>
+                            {aliveAICount > 0 && (
+                              <button
+                                type="button"
+                                onClick={handleContinueAIDebate}
+                                disabled={isGeneratingAI}
+                                className="py-2 px-3 rounded-lg bg-slate-800 hover:bg-slate-700 disabled:opacity-50 text-slate-200 font-semibold text-xs transition-colors cursor-pointer flex items-center justify-center gap-1.5 border border-slate-700"
+                              >
+                                <MessageSquare className="w-3.5 h-3.5 text-amber-400" />
+                                <span>ฟังคนในวงวิเคราะห์กันต่อ</span>
+                              </button>
+                            )}
+
+                            <button
+                              type="button"
+                              onClick={handleProceedToVoting}
+                              disabled={isGeneratingAI}
+                              className="py-2 px-3 rounded-lg bg-amber-500 hover:bg-amber-400 disabled:opacity-50 text-slate-950 font-bold text-xs transition-colors cursor-pointer flex items-center justify-center gap-1.5"
+                            >
+                              <UserCheck className="w-4 h-4" />
+                              <span>เข้าสู่ช่วงโหวตประหาร (วันที่ {dayCount})</span>
+                            </button>
+                          </div>
+                        </>
                       )}
-
-                      <div
-                        className={`grid gap-2 ${
-                          aliveAICount > 0 ? 'grid-cols-1 sm:grid-cols-2' : 'grid-cols-1'
-                        }`}
-                      >
-                        {aliveAICount > 0 && (
-                          <button
-                            type="button"
-                            onClick={handleContinueAIDebate}
-                            disabled={isGeneratingAI}
-                            className="py-2 px-3 rounded-lg bg-slate-800 hover:bg-slate-700 disabled:opacity-50 text-slate-200 font-semibold text-xs transition-colors cursor-pointer flex items-center justify-center gap-1.5 border border-slate-700"
-                          >
-                            <MessageSquare className="w-3.5 h-3.5 text-amber-400" />
-                            <span>ฟังคนในวงวิเคราะห์กันต่อ</span>
-                          </button>
-                        )}
-
-                        <button
-                          type="button"
-                          onClick={handleProceedToVoting}
-                          disabled={isGeneratingAI}
-                          className="py-2 px-3 rounded-lg bg-amber-500 hover:bg-amber-400 disabled:opacity-50 text-slate-950 font-bold text-xs transition-colors cursor-pointer flex items-center justify-center gap-1.5"
-                        >
-                          <UserCheck className="w-4 h-4" />
-                          <span>เข้าสู่ช่วงโหวตประหาร (วันที่ {dayCount})</span>
-                        </button>
-                      </div>
                     </div>
                   )}
 
                   {/* PHASE 3: DAY VOTING CONTROLS */}
                   {phase === 'DAY_VOTING' && (
                     <div className="space-y-2.5">
-                      {hasSubmittedVote && isMultiDeviceOnline ? (
+                      {!myPlayer ? (
+                        <div className="p-3 rounded-lg bg-slate-900 border border-slate-700 text-xs text-slate-300 text-center">
+                          โหมดผู้ชม — รอผู้เล่นในสภาลงคะแนนโหวตประหาร
+                        </div>
+                      ) : hasSubmittedVote && isMultiDeviceOnline ? (
                         <div className="space-y-2">
                           <div className="p-3 rounded-lg bg-amber-950/40 border border-amber-500/40 text-xs text-amber-200 text-center">
                             ส่งคะแนนโหวตของคุณแล้ว · รอเพื่อนในห้องลงคะแนน ({voteReadyIds.length}/{onlineEligibleHumanVoters.length} คน)
@@ -3017,7 +2989,7 @@ export default function App() {
                               onClick={() =>
                                 sendWsMessage({
                                   type: 'FORCE_RESOLVE_VOTE',
-                                  playerId: humanPlayer.id,
+                                  playerId: myPlayer.id,
                                   voteTargetId: selectedTargetId,
                                 })
                               }
@@ -3027,14 +2999,14 @@ export default function App() {
                             </button>
                           )}
                         </div>
-                      ) : humanPlayer.alive && humanPlayer.canVote ? (
+                      ) : myPlayer.alive && myPlayer.canVote ? (
                         <>
                           <p className="text-xs text-amber-300 font-semibold">
-                            เลือกผู้เล่น 1 คนที่ {humanPlayer.name} ต้องการโหวตประหาร (หากคะแนนสูงสุดเสมอกันจะไม่มีใครตาย):
+                            เลือกผู้เล่น 1 คนที่ {myPlayer.name} ต้องการโหวตประหาร (หากคะแนนสูงสุดเสมอกันจะไม่มีใครตาย):
                           </p>
                           <div className="flex flex-wrap gap-1.5">
                             {players
-                              .filter((p) => p.alive && p.id !== humanPlayer.id)
+                              .filter((p) => p.alive && p.id !== myPlayer.id)
                               .map((p) => (
                                 <button
                                   key={p.id}
@@ -3067,7 +3039,7 @@ export default function App() {
                           disabled={isGeneratingAI}
                           className="w-full py-2.5 px-4 rounded-lg bg-red-600 hover:bg-red-500 text-white font-bold text-sm transition-colors cursor-pointer"
                         >
-                          {!humanPlayer.alive
+                          {!myPlayer.alive
                             ? 'ดูผลการโหวตของผู้เล่นที่เหลืออยู่'
                             : 'คุณเสียสิทธิ์โหวตแล้ว (ยาจก) · กดเพื่อดูผลโหวตของสภา'}
                         </button>
@@ -3091,18 +3063,18 @@ export default function App() {
           </div>
         )}
 
-      {/* 4. IN-GAME SECRET ROLE CARD MODAL */}
-      {showRoleCardModal && (
+      {/* 4. IN-GAME SECRET ROLE CARD MODAL (STRICTLY ONLY MY OWN CARD) */}
+      {showRoleCardModal && myPlayer && (
         <div className="absolute inset-0 z-40 flex items-center justify-center p-4 bg-black/80 pointer-events-auto">
           <div className="bg-[#0F172A] border border-slate-700 rounded-2xl max-w-md w-full p-6 space-y-4 shadow-2xl">
             <div className="flex items-center justify-between">
               <div>
                 <p className="text-xs text-amber-400 font-semibold">
-                  การ์ดบทบาทลับของ {humanPlayer.name} · ห้ามให้ผู้อื่นล่วงรู้
+                  การ์ดบทบาทลับของ {myPlayer.name} · ห้ามให้ผู้อื่นล่วงรู้
                 </p>
                 <h3 className="text-xl font-bold text-white">
-                  {ROLE_INFO[humanPlayer.role].thaiName} (
-                  {ROLE_INFO[humanPlayer.role].englishName})
+                  {ROLE_INFO[myPlayer.role].thaiName} (
+                  {ROLE_INFO[myPlayer.role].englishName})
                 </h3>
               </div>
               <button
@@ -3117,8 +3089,8 @@ export default function App() {
             <div className="relative aspect-[3/4] w-56 mx-auto rounded-xl overflow-hidden border border-amber-500/30 bg-slate-900">
               {!roleCardImgError ? (
                 <img
-                  src={ROLE_INFO[humanPlayer.role].image}
-                  alt={`การ์ดบทบาท ${ROLE_INFO[humanPlayer.role].thaiName}`}
+                  src={ROLE_INFO[myPlayer.role].image}
+                  alt={`การ์ดบทบาท ${ROLE_INFO[myPlayer.role].thaiName}`}
                   referrerPolicy="no-referrer"
                   onError={() => setRoleCardImgError(true)}
                   className="w-full h-full object-cover"
@@ -3127,10 +3099,10 @@ export default function App() {
                 <div className="w-full h-full flex flex-col items-center justify-center p-6 text-center bg-gradient-to-b from-slate-800 to-slate-950">
                   <Shield className="w-12 h-12 text-amber-400 mb-3" />
                   <span className="font-bold text-lg text-white">
-                    {ROLE_INFO[humanPlayer.role].thaiName}
+                    {ROLE_INFO[myPlayer.role].thaiName}
                   </span>
                   <span className="text-xs text-slate-400 mt-1">
-                    {ROLE_INFO[humanPlayer.role].teamThai}
+                    {ROLE_INFO[myPlayer.role].teamThai}
                   </span>
                 </div>
               )}
@@ -3138,9 +3110,9 @@ export default function App() {
 
             <div className="space-y-2 text-xs md:text-sm text-slate-300 leading-relaxed">
               <div className="text-amber-300 font-semibold">
-                สังกัด: {ROLE_INFO[humanPlayer.role].teamThai}
+                สังกัด: {ROLE_INFO[myPlayer.role].teamThai}
               </div>
-              <p>{ROLE_INFO[humanPlayer.role].summary}</p>
+              <p>{ROLE_INFO[myPlayer.role].summary}</p>
               {fellowWolves.length > 0 && (
                 <p className="text-red-300 font-semibold">
                   เพื่อนร่วมฝูงหมาป่าของคุณคือ:{' '}
@@ -3149,7 +3121,7 @@ export default function App() {
                     .join(', ')}
                 </p>
               )}
-              {humanPlayer.role === 'SEER' && seerKnowledge.length > 0 && (
+              {myPlayer.role === 'SEER' && seerKnowledge.length > 0 && (
                 <div className="pt-1 border-t border-slate-800">
                   <p className="font-semibold text-amber-300 mb-1">
                     ประวัติการส่องของเทพพยากรณ์:
@@ -3208,7 +3180,6 @@ export default function App() {
                 • <strong className="text-white">เงื่อนไขการชนะ:</strong>{' '}
                 ฝ่ายชาวบ้านชนะเมื่อกำจัดพ่อหมาป่าและลูกหมาป่าได้ครบทั้ง 2 ตน /
                 ฝ่ายหมาป่าชนะทันทีเมื่อจำนวนฝ่ายหมาป่าที่รอดชีวิตเท่ากับหรือมากกว่าชาวบ้านที่เหลืออยู่
-                (ขณะนี้เหลือฝ่ายหมาป่า {aliveWolvesCount} ตน)
               </p>
             </div>
 

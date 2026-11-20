@@ -90,6 +90,26 @@ function extractJsonFromText(raw: string): any {
   }
 }
 
+const AI_TIMEOUT_MS = Number(process.env.AI_TIMEOUT_MS) || 7500;
+
+function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      reject(new Error(`${label} timed out after ${ms}ms`));
+    }, ms);
+    promise.then(
+      (val) => {
+        clearTimeout(timer);
+        resolve(val);
+      },
+      (err) => {
+        clearTimeout(timer);
+        reject(err);
+      }
+    );
+  });
+}
+
 async function callGeminiProvider(params: {
   tier: "primary" | "fast";
   systemInstruction: string;
@@ -108,25 +128,40 @@ async function callGeminiProvider(params: {
     },
   });
 
-  // Try preferred tier model first, then alternate Gemini model
-  const modelsToTry =
-    params.tier === "primary"
-      ? [cfg.primaryModel, cfg.fastModel]
-      : [cfg.fastModel, cfg.primaryModel];
+  // For real-time multiplayer board game speed, always prioritize the fast model (gemini-2.5-flash)
+  // unless AI_PREFER_PRIMARY=true is explicitly enabled in .env.
+  const preferPrimary =
+    process.env.AI_PREFER_PRIMARY === "true" && params.tier === "primary";
+  const modelsToTry = preferPrimary
+    ? [cfg.primaryModel, cfg.fastModel]
+    : [cfg.fastModel, cfg.primaryModel];
   const uniqueModels = Array.from(new Set(modelsToTry.filter(Boolean)));
 
   let lastErr: any = null;
   for (const modelName of uniqueModels) {
     try {
-      const response = await ai.models.generateContent({
-        model: modelName,
-        contents: params.userPrompt,
-        config: {
-          systemInstruction: params.systemInstruction,
-          responseMimeType: "application/json",
-          responseSchema: params.responseSchema,
-        },
-      });
+      const isFlash25 = modelName.toLowerCase().includes("2.5-flash");
+      const config: any = {
+        systemInstruction: params.systemInstruction,
+        responseMimeType: "application/json",
+        responseSchema: params.responseSchema,
+        temperature: 0.75,
+        maxOutputTokens: 900,
+      };
+      // Disable extended thinking on 2.5-flash so AI responds in ~1-2 seconds instead of 20-40s
+      if (isFlash25) {
+        config.thinkingConfig = { thinkingBudget: 0 };
+      }
+
+      const response = await withTimeout(
+        ai.models.generateContent({
+          model: modelName,
+          contents: params.userPrompt,
+          config,
+        }),
+        AI_TIMEOUT_MS,
+        `gemini:${modelName}`
+      );
       const parsed = extractJsonFromText(response.text ?? "");
       return { data: parsed, modelUsed: `gemini:${modelName}` };
     } catch (err) {
@@ -167,38 +202,47 @@ async function callOpenAICompatibleProvider(params: {
     model = (process.env.DEEPSEEK_MODEL || "deepseek-chat").trim();
   }
 
-  const res = await fetch(endpoint, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${apiKey}`,
-      ...extraHeaders,
-    },
-    body: JSON.stringify({
-      model,
-      temperature: 0.8,
-      response_format: { type: "json_object" },
-      messages: [
-        {
-          role: "system",
-          content: `${params.systemInstruction}\n\nสำคัญมาก: ตอบกลับเป็น JSON ที่ถูกต้องตามโครงสร้างนี้เท่านั้น ห้ามมีคำอธิบายนอก JSON:\n${params.jsonHint}`,
-        },
-        { role: "user", content: params.userPrompt },
-      ],
-    }),
-  });
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), AI_TIMEOUT_MS);
 
-  if (!res.ok) {
-    const errText = await res.text().catch(() => "");
-    throw new Error(`${params.provider} HTTP ${res.status}: ${errText.slice(0, 200)}`);
+  try {
+    const res = await fetch(endpoint, {
+      method: "POST",
+      signal: controller.signal,
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${apiKey}`,
+        ...extraHeaders,
+      },
+      body: JSON.stringify({
+        model,
+        temperature: 0.75,
+        max_tokens: 900,
+        response_format: { type: "json_object" },
+        messages: [
+          {
+            role: "system",
+            content: `${params.systemInstruction}\n\nสำคัญมาก: ตอบกลับเป็น JSON ที่ถูกต้องตามโครงสร้างนี้เท่านั้น ห้ามมีคำอธิบายนอก JSON:\n${params.jsonHint}`,
+          },
+          { role: "user", content: params.userPrompt },
+        ],
+      }),
+    });
+
+    if (!res.ok) {
+      const errText = await res.text().catch(() => "");
+      throw new Error(`${params.provider} HTTP ${res.status}: ${errText.slice(0, 200)}`);
+    }
+
+    const json: any = await res.json();
+    const content = json?.choices?.[0]?.message?.content || "";
+    return {
+      data: extractJsonFromText(content),
+      modelUsed: `${params.provider}:${model}`,
+    };
+  } finally {
+    clearTimeout(timeoutId);
   }
-
-  const json: any = await res.json();
-  const content = json?.choices?.[0]?.message?.content || "";
-  return {
-    data: extractJsonFromText(content),
-    modelUsed: `${params.provider}:${model}`,
-  };
 }
 
 async function callAnthropicProvider(params: {
@@ -209,34 +253,42 @@ async function callAnthropicProvider(params: {
   const apiKey = (process.env.ANTHROPIC_API_KEY || "").trim();
   const model = (process.env.ANTHROPIC_MODEL || "claude-3-5-haiku-latest").trim();
 
-  const res = await fetch("https://api.anthropic.com/v1/messages", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "x-api-key": apiKey,
-      "anthropic-version": "2023-06-01",
-    },
-    body: JSON.stringify({
-      model,
-      max_tokens: 1600,
-      system: `${params.systemInstruction}\n\nสำคัญมาก: ตอบกลับเป็น JSON ที่ถูกต้องตามโครงสร้างนี้เท่านั้น ห้ามมีข้อความอื่นนอก JSON:\n${params.jsonHint}`,
-      messages: [{ role: "user", content: params.userPrompt }],
-    }),
-  });
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), AI_TIMEOUT_MS);
 
-  if (!res.ok) {
-    const errText = await res.text().catch(() => "");
-    throw new Error(`anthropic HTTP ${res.status}: ${errText.slice(0, 200)}`);
+  try {
+    const res = await fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      signal: controller.signal,
+      headers: {
+        "Content-Type": "application/json",
+        "x-api-key": apiKey,
+        "anthropic-version": "2023-06-01",
+      },
+      body: JSON.stringify({
+        model,
+        max_tokens: 900,
+        system: `${params.systemInstruction}\n\nสำคัญมาก: ตอบกลับเป็น JSON ที่ถูกต้องตามโครงสร้างนี้เท่านั้น ห้ามมีข้อความอื่นนอก JSON:\n${params.jsonHint}`,
+        messages: [{ role: "user", content: params.userPrompt }],
+      }),
+    });
+
+    if (!res.ok) {
+      const errText = await res.text().catch(() => "");
+      throw new Error(`anthropic HTTP ${res.status}: ${errText.slice(0, 200)}`);
+    }
+
+    const json: any = await res.json();
+    const textBlock = Array.isArray(json?.content)
+      ? json.content.find((b: any) => b.type === "text")?.text || ""
+      : "";
+    return {
+      data: extractJsonFromText(textBlock),
+      modelUsed: `anthropic:${model}`,
+    };
+  } finally {
+    clearTimeout(timeoutId);
   }
-
-  const json: any = await res.json();
-  const textBlock = Array.isArray(json?.content)
-    ? json.content.find((b: any) => b.type === "text")?.text || ""
-    : "";
-  return {
-    data: extractJsonFromText(textBlock),
-    modelUsed: `anthropic:${model}`,
-  };
 }
 
 async function generateStructuredAIJson(params: {
@@ -345,6 +397,137 @@ function getOrCreateRoom(roomId: string): RoomState {
   return room;
 }
 
+function getLiveOnlineIds(roomId: string): Set<string> {
+  const onlineIds = new Set<string>();
+  for (const [ws, meta] of clientMeta.entries()) {
+    if (meta.roomId === roomId && ws.readyState === WebSocket.OPEN) {
+      onlineIds.add(meta.playerId);
+    }
+  }
+  return onlineIds;
+}
+
+function syncOnlineStatus(room: RoomState) {
+  const liveIds = getLiveOnlineIds(room.roomId);
+  room.participants = room.participants.map((p) => ({
+    ...p,
+    isOnline: liveIds.has(p.id),
+  }));
+}
+
+function isWolfRole(role: string | undefined): boolean {
+  return role === "WEREWOLF" || role === "WOLF_CUB";
+}
+
+function sanitizeSnapshotForRecipient(
+  snapshot: any,
+  recipientPlayerId: string,
+  isHost: boolean
+): any {
+  if (!snapshot) return snapshot;
+
+  const isGameOver =
+    snapshot.shellState === "GAME_OVER" || snapshot.phase === "GAME_OVER";
+
+  // STRICT PRIVACY: Secret messages are ONLY sent to their exact owner (even over WS wire)
+  const filteredMessages = Array.isArray(snapshot.messages)
+    ? snapshot.messages.filter((m: any) => {
+        if (m.isSecret || m.senderId === "secret") {
+          return m.visibleToPlayerId === recipientPlayerId;
+        }
+        return true;
+      })
+    : [];
+
+  // Host retains full player roles in memory for game-engine night/vote resolution,
+  // while non-host players ONLY receive their own role (+ fellow wolf if wolf, + revealed beggar)
+  // until GAME_OVER.
+  if (isGameOver || isHost) {
+    return {
+      ...snapshot,
+      messages: filteredMessages,
+    };
+  }
+
+  const allPlayers: any[] = Array.isArray(snapshot.players) ? snapshot.players : [];
+  const recipientPlayer = allPlayers.find((p) => p.id === recipientPlayerId);
+  const recipientIsWolf = isWolfRole(recipientPlayer?.role);
+
+  const sanitizedPlayers = allPlayers.map((p) => {
+    const canSeeTrueRole =
+      p.id === recipientPlayerId ||
+      Boolean(p.revealedBeggar) ||
+      (recipientIsWolf && isWolfRole(p.role));
+    return canSeeTrueRole ? p : { ...p, role: "VILLAGER" };
+  });
+
+  return {
+    ...snapshot,
+    players: sanitizedPlayers,
+    seerKnowledge:
+      recipientPlayer?.role === "SEER" && Array.isArray(snapshot.seerKnowledge)
+        ? snapshot.seerKnowledge
+        : [],
+    bodyguardKnowledge:
+      recipientPlayer?.role === "BODYGUARD" &&
+      Array.isArray(snapshot.bodyguardKnowledge)
+        ? snapshot.bodyguardKnowledge
+        : [],
+    messages: filteredMessages,
+  };
+}
+
+function mergeAuthoritativeSnapshot(
+  prevSnapshot: any,
+  incomingSnapshot: any,
+  senderIsHost: boolean
+): any {
+  if (!incomingSnapshot) return prevSnapshot;
+  if (!prevSnapshot) return incomingSnapshot;
+
+  // Preserve secret messages that belong to other players so they are never wiped out on sync
+  const prevSecretMsgs = Array.isArray(prevSnapshot.messages)
+    ? prevSnapshot.messages.filter((m: any) => m.isSecret || m.senderId === "secret")
+    : [];
+  const incomingMsgs = Array.isArray(incomingSnapshot.messages)
+    ? incomingSnapshot.messages
+    : [];
+  const incomingIds = new Set(incomingMsgs.map((m: any) => m.id));
+  const missingSecrets = prevSecretMsgs.filter((m: any) => !incomingIds.has(m.id));
+  const mergedMessages =
+    missingSecrets.length > 0 ? [...missingSecrets, ...incomingMsgs] : incomingMsgs;
+
+  if (senderIsHost) {
+    return {
+      ...incomingSnapshot,
+      messages: mergedMessages,
+    };
+  }
+
+  // Non-host clients have masked roles; NEVER let a non-host overwrite authoritative roles or private knowledge
+  const trueRoleById = new Map<string, string>();
+  if (Array.isArray(prevSnapshot.players)) {
+    for (const p of prevSnapshot.players) {
+      trueRoleById.set(p.id, p.role);
+    }
+  }
+  const mergedPlayers = Array.isArray(incomingSnapshot.players)
+    ? incomingSnapshot.players.map((p: any) => ({
+        ...p,
+        role: trueRoleById.get(p.id) || p.role,
+      }))
+    : prevSnapshot.players;
+
+  return {
+    ...prevSnapshot,
+    ...incomingSnapshot,
+    players: mergedPlayers,
+    seerKnowledge: prevSnapshot.seerKnowledge || [],
+    bodyguardKnowledge: prevSnapshot.bodyguardKnowledge || [],
+    messages: mergedMessages,
+  };
+}
+
 function broadcastToRoom(roomId: string, payload: any, excludeWs?: WebSocket) {
   const msg = JSON.stringify(payload);
   for (const [ws, meta] of clientMeta.entries()) {
@@ -354,6 +537,23 @@ function broadcastToRoom(roomId: string, payload: any, excludeWs?: WebSocket) {
       ws.readyState === WebSocket.OPEN
     ) {
       ws.send(msg);
+    }
+  }
+}
+
+function broadcastPersonalizedToRoom(
+  room: RoomState,
+  buildPayload: (playerId: string, isHost: boolean) => any,
+  excludeWs?: WebSocket
+) {
+  for (const [ws, meta] of clientMeta.entries()) {
+    if (
+      meta.roomId === room.roomId &&
+      ws !== excludeWs &&
+      ws.readyState === WebSocket.OPEN
+    ) {
+      const payload = buildPayload(meta.playerId, room.hostId === meta.playerId);
+      ws.send(JSON.stringify(payload));
     }
   }
 }
@@ -540,6 +740,8 @@ async function startServer() {
             );
           }
 
+          syncOnlineStatus(room);
+
           ws.send(
             JSON.stringify({
               type: "ROOM_SYNC",
@@ -548,7 +750,11 @@ async function startServer() {
               totalPlayers: room.totalPlayers,
               participants: room.participants,
               gameStarted: room.gameStarted,
-              snapshot: room.gameSnapshot,
+              snapshot: sanitizeSnapshotForRecipient(
+                room.gameSnapshot,
+                playerId,
+                room.hostId === playerId
+              ),
               nightReadyIds: Object.keys(room.pendingNightActions),
               voteReadyIds: Object.keys(room.pendingDayVotes),
             })
@@ -565,33 +771,59 @@ async function startServer() {
             ws
           );
         } else if (type === "UPDATE_LOBBY") {
+          if (Array.isArray(participants)) {
+            const liveIds = getLiveOnlineIds(normalizedRoomId);
+            const incomingById = new Map<string, RoomParticipant>();
+            for (const p of participants.slice(0, MAX_HUMAN_PLAYERS)) {
+              if (p && p.id) {
+                incomingById.set(p.id, {
+                  id: p.id,
+                  name: typeof p.name === "string" ? p.name.slice(0, 24) : "ผู้เล่น",
+                  isOnline: liveIds.has(p.id),
+                });
+              }
+            }
+            // Never drop currently online participants during a lobby update
+            for (const existing of room.participants) {
+              if (liveIds.has(existing.id) && !incomingById.has(existing.id)) {
+                incomingById.set(existing.id, { ...existing, isOnline: true });
+              }
+            }
+            room.participants = Array.from(incomingById.values()).slice(
+              0,
+              MAX_HUMAN_PLAYERS
+            );
+          }
+
+          syncOnlineStatus(room);
+
           if (typeof totalPlayers === "number") {
             room.totalPlayers = Math.max(
               6,
-              Math.min(MAX_HUMAN_PLAYERS, Math.max(totalPlayers, room.participants.length))
+              Math.min(
+                MAX_HUMAN_PLAYERS,
+                Math.max(totalPlayers, room.participants.length)
+              )
+            );
+          } else if (room.participants.length > room.totalPlayers) {
+            room.totalPlayers = Math.min(
+              MAX_HUMAN_PLAYERS,
+              room.participants.length
             );
           }
-          if (Array.isArray(participants)) {
-            room.participants = participants.slice(0, MAX_HUMAN_PLAYERS);
-            if (room.participants.length > room.totalPlayers) {
-              room.totalPlayers = Math.min(MAX_HUMAN_PLAYERS, room.participants.length);
-            }
-          }
-          broadcastToRoom(
-            normalizedRoomId,
-            {
-              type: "LOBBY_UPDATED",
-              hostId: room.hostId,
-              totalPlayers: room.totalPlayers,
-              participants: room.participants,
-            },
-            ws
-          );
+
+          broadcastToRoom(normalizedRoomId, {
+            type: "LOBBY_UPDATED",
+            hostId: room.hostId,
+            totalPlayers: room.totalPlayers,
+            participants: room.participants,
+          });
         } else if (type === "UPDATE_NAME") {
           const target = room.participants.find((p) => p.id === playerId);
           if (target && typeof playerName === "string") {
             target.name = playerName.slice(0, 24);
           }
+          syncOnlineStatus(room);
           broadcastToRoom(
             normalizedRoomId,
             {
@@ -607,39 +839,62 @@ async function startServer() {
           room.gameSnapshot = snapshot;
           room.pendingNightActions = {};
           room.pendingDayVotes = {};
-          broadcastToRoom(
-            normalizedRoomId,
-            {
+          syncOnlineStatus(room);
+
+          broadcastPersonalizedToRoom(
+            room,
+            (recipientId, recipientIsHost) => ({
               type: "GAME_STARTED",
               hostId: room.hostId,
-              snapshot,
-            },
+              participants: room.participants,
+              snapshot: sanitizeSnapshotForRecipient(
+                room.gameSnapshot,
+                recipientId,
+                recipientIsHost
+              ),
+            }),
             ws
           );
         } else if (type === "SYNC_GAME_STATE") {
-          room.gameSnapshot = snapshot;
-          if (snapshot?.phase !== "NIGHT_ACTION") {
+          const senderMeta = clientMeta.get(ws);
+          const senderId = senderMeta?.playerId || playerId;
+          const senderIsHost = !room.hostId || senderId === room.hostId;
+
+          room.gameSnapshot = mergeAuthoritativeSnapshot(
+            room.gameSnapshot,
+            snapshot,
+            senderIsHost
+          );
+          if (room.gameSnapshot?.phase !== "NIGHT_ACTION") {
             room.pendingNightActions = {};
           }
-          if (snapshot?.phase !== "DAY_VOTING") {
+          if (room.gameSnapshot?.phase !== "DAY_VOTING") {
             room.pendingDayVotes = {};
           }
-          broadcastToRoom(
-            normalizedRoomId,
-            {
+
+          broadcastPersonalizedToRoom(
+            room,
+            (recipientId, recipientIsHost) => ({
               type: "GAME_STATE_UPDATED",
-              snapshot,
+              hostId: room.hostId,
+              snapshot: sanitizeSnapshotForRecipient(
+                room.gameSnapshot,
+                recipientId,
+                recipientIsHost
+              ),
               nightReadyIds: Object.keys(room.pendingNightActions),
               voteReadyIds: Object.keys(room.pendingDayVotes),
-            },
+            }),
             ws
           );
         } else if (type === "HUMAN_CHAT" && chatMessage) {
           if (room.gameSnapshot && Array.isArray(room.gameSnapshot.messages)) {
-            room.gameSnapshot.messages = [
-              ...room.gameSnapshot.messages,
-              chatMessage,
-            ];
+            if (!room.gameSnapshot.messages.some((m: any) => m.id === chatMessage.id)) {
+              room.gameSnapshot.messages = [
+                ...room.gameSnapshot.messages,
+                chatMessage,
+              ];
+            }
           }
           broadcastToRoom(
             normalizedRoomId,
@@ -650,6 +905,7 @@ async function startServer() {
             ws
           );
         } else if (type === "SUBMIT_NIGHT_ACTION") {
+          syncOnlineStatus(room);
           room.pendingNightActions[playerId] = nightAction || { primary: null };
           const readyIds = Object.keys(room.pendingNightActions);
 
@@ -659,14 +915,12 @@ async function startServer() {
           });
 
           const snapPlayers: any[] = room.gameSnapshot?.players || [];
-          const onlineHumanIds = new Set(
-            room.participants.filter((p) => p.isOnline).map((p) => p.id)
-          );
+          const onlineHumanIds = getLiveOnlineIds(normalizedRoomId);
           const requiredHumanPlayers = snapPlayers.filter(
             (p) => p.isHuman && p.alive && onlineHumanIds.has(p.id)
           );
           const allSubmitted =
-            requiredHumanPlayers.length > 0 &&
+            requiredHumanPlayers.length === 0 ||
             requiredHumanPlayers.every((p) => Boolean(room.pendingNightActions[p.id]));
 
           if (allSubmitted) {
@@ -684,11 +938,13 @@ async function startServer() {
             actionsCopy[playerId] = nightAction;
           }
           room.pendingNightActions = {};
-          sendToPlayerInRoom(normalizedRoomId, playerId, {
+          const resolverId = findActiveHostOrFirstOnline(room) || playerId;
+          sendToPlayerInRoom(normalizedRoomId, resolverId, {
             type: "EXECUTE_NIGHT_RESOLVE",
             humanActions: actionsCopy,
           });
         } else if (type === "SUBMIT_DAY_VOTE") {
+          syncOnlineStatus(room);
           if (voteTargetId) {
             room.pendingDayVotes[playerId] = voteTargetId;
           } else {
@@ -702,14 +958,12 @@ async function startServer() {
           });
 
           const snapPlayers: any[] = room.gameSnapshot?.players || [];
-          const onlineHumanIds = new Set(
-            room.participants.filter((p) => p.isOnline).map((p) => p.id)
-          );
+          const onlineHumanIds = getLiveOnlineIds(normalizedRoomId);
           const requiredVoters = snapPlayers.filter(
             (p) => p.isHuman && p.alive && p.canVote && onlineHumanIds.has(p.id)
           );
           const allVoted =
-            requiredVoters.length > 0 &&
+            requiredVoters.length === 0 ||
             requiredVoters.every((p) => Boolean(room.pendingDayVotes[p.id]));
 
           if (allVoted) {
@@ -733,7 +987,8 @@ async function startServer() {
             votesCopy[playerId] = voteTargetId;
           }
           room.pendingDayVotes = {};
-          sendToPlayerInRoom(normalizedRoomId, playerId, {
+          const resolverId = findActiveHostOrFirstOnline(room) || playerId;
+          sendToPlayerInRoom(normalizedRoomId, resolverId, {
             type: "EXECUTE_VOTE_RESOLVE",
             humanVotes: votesCopy,
           });
@@ -742,6 +997,7 @@ async function startServer() {
           room.gameSnapshot = null;
           room.pendingNightActions = {};
           room.pendingDayVotes = {};
+          syncOnlineStatus(room);
           broadcastToRoom(
             normalizedRoomId,
             {
@@ -764,15 +1020,14 @@ async function startServer() {
         clientMeta.delete(ws);
         const room = rooms.get(meta.roomId);
         if (room) {
-          const p = room.participants.find((item) => item.id === meta.playerId);
-          if (p) {
-            p.isOnline = false;
-          }
+          syncOnlineStatus(room);
+          let hostTransferredTo: string | null = null;
           // If host disconnected, transfer host to next online participant
           if (room.hostId === meta.playerId) {
             const nextOnline = room.participants.find((item) => item.isOnline);
             if (nextOnline) {
               room.hostId = nextOnline.id;
+              hostTransferredTo = nextOnline.id;
             }
           }
           broadcastToRoom(meta.roomId, {
@@ -781,6 +1036,20 @@ async function startServer() {
             totalPlayers: room.totalPlayers,
             participants: room.participants,
           });
+          // Give the newly promoted host authoritative game state so they can resolve nights/votes
+          if (hostTransferredTo && room.gameStarted && room.gameSnapshot) {
+            sendToPlayerInRoom(meta.roomId, hostTransferredTo, {
+              type: "GAME_STATE_UPDATED",
+              hostId: room.hostId,
+              snapshot: sanitizeSnapshotForRecipient(
+                room.gameSnapshot,
+                hostTransferredTo,
+                true
+              ),
+              nightReadyIds: Object.keys(room.pendingNightActions),
+              voteReadyIds: Object.keys(room.pendingDayVotes),
+            });
+          }
         }
       }
     });
@@ -836,15 +1105,16 @@ async function startServer() {
     });
   });
 
-  // Endpoint 1: Generate natural, unscripted Thai Day Discussion (Multi-AI enabled)
+  // Endpoint 1: Generate natural, unscripted Thai Day Discussion (Fast Multi-AI enabled)
   app.post("/api/werewolf/discuss", async (req, res) => {
     try {
       const {
+        roomId,
         dayNumber,
-        players,
+        players: reqPlayers,
         nightVictimNames,
-        seerKnowledge,
-        bodyguardKnowledge,
+        seerKnowledge: reqSeerKnowledge,
+        bodyguardKnowledge: reqBgKnowledge,
         recentTranscript,
         previousVotes,
         humanMessage,
@@ -852,14 +1122,27 @@ async function startServer() {
         mode, // 'INITIAL_DAY' | 'REPLY_TO_HUMAN' | 'CONTINUE_DEBATE'
       } = req.body;
 
-      const aliveAI = (players || []).filter((p: any) => p.alive && !p.isHuman);
+      // Use server's authoritative gameSnapshot when available so non-host clients never need true roles
+      const authSnap =
+        roomId && rooms.get(String(roomId).trim().toUpperCase())?.gameSnapshot;
+      const players = Array.isArray(authSnap?.players)
+        ? authSnap.players
+        : reqPlayers || [];
+      const seerKnowledge = Array.isArray(authSnap?.seerKnowledge)
+        ? authSnap.seerKnowledge
+        : reqSeerKnowledge || [];
+      const bodyguardKnowledge = Array.isArray(authSnap?.bodyguardKnowledge)
+        ? authSnap.bodyguardKnowledge
+        : reqBgKnowledge || [];
+
+      const aliveAI = players.filter((p: any) => p.alive && !p.isHuman);
       if (aliveAI.length === 0) {
         return res.json({ fallback: false, data: { messages: [] }, aliveAIIds: [] });
       }
 
-      const totalCount = Array.isArray(players) ? players.length : 10;
-      const aliveAll = (players || []).filter((p: any) => p.alive);
-      const deadAll = (players || []).filter((p: any) => !p.alive);
+      const totalCount = players.length || 10;
+      const aliveAll = players.filter((p: any) => p.alive);
+      const deadAll = players.filter((p: any) => !p.alive);
 
       const playerDescriptions = aliveAll
         .map(
@@ -873,7 +1156,7 @@ async function startServer() {
           ? deadAll.map((p: any) => `${p.name}`).join(", ")
           : "ยังไม่มีผู้เสียชีวิตก่อนหน้านี้";
 
-      const wolvesNames = (players || [])
+      const wolvesNames = players
         .filter((p: any) => p.role === "WEREWOLF" || p.role === "WOLF_CUB")
         .map((p: any) => `${p.name} (${p.role})`)
         .join(" และ ");
@@ -881,61 +1164,57 @@ async function startServer() {
       const aiIdsList = aliveAI.map((a: any) => `${a.name} [${a.id}]`).join(", ");
 
       const systemPrompt = `คุณคือระบบจำลองผู้เล่นมนุษย์จริงๆ ที่กำลังล้อมวงเล่นบอร์ดเกม Ultimate Werewolf เป็นภาษาไทย (เริ่มเกมมี ${totalCount} คน, ตอนนี้เหลือรอดชีวิต ${aliveAll.length} คน)
-กฎสำคัญเพื่อให้การคุยสมจริงเหมือนคนเล่นจริง 100% (ห้ามใช้บทพูดสำเร็จรูปหรือแพตเทิร์นซ้ำซากเด็ดขาด):
+กฎสำคัญเพื่อให้การคุยสมจริงเหมือนคนเล่นจริง 100% และตอบกระชับรวดเร็ว (คนละ 1-2 ประโยคสั้นๆ ชัดเจน):
 1. สร้างคำพูดเฉพาะจากผู้เล่น AI ที่ยังมีชีวิตอยู่เท่านั้น (${aiIdsList}) — ห้ามสร้างคำพูดแทนผู้เล่นคนจริงเด็ดขาด
-2. ให้ผู้เล่นแต่ละคนพูดคุย ถกเถียง ตั้งข้อสงสัย วิเคราะห์รูปเกม และต่อปากต่อคำกันเองเหมือนกลุ่มเพื่อนคนไทยที่กำลังเล่นบอร์ดเกม Werewolf จริงๆ ใช้ภาษาพูดที่เป็นธรรมชาติ กระชับ มีเหตุผลรองรับ
+2. ใช้ภาษาพูดแบบเพื่อนคนไทยเล่นบอร์ดเกมจริงๆ ถกเถียง ตั้งข้อสังเกต วิเคราะห์รูปเกม และโต้ตอบกันอย่างเป็นธรรมชาติ
 3. ห้ามโกงด้วยข้อมูลนอกบทบาท! แต่ละคนรู้เฉพาะข้อมูลของบทบาทตัวเองเท่านั้น:
-   - คนที่ได้บทบาท WEREWOLF (พ่อหมาป่า) หรือ WOLF_CUB (ลูกหมาป่า) [ได้แก่: ${wolvesNames}]: รู้จักกันเอง ต้องพยายามทำตัวเนียนเป็นชาวบ้าน ช่วยกันวิเคราะห์แบบเนียนๆ เบี่ยงประเด็นไปหาคนอื่น หรือแกล้งตั้งข้อสังเกตที่ฟังดูมีเหตุผลเพื่อเอาตัวรอด
-   - คนที่ได้บทบาท SEER (เทพพยากรณ์): รู้ผลส่องลูกแก้วของตัวเองเท่านั้น (${JSON.stringify(seerKnowledge || [])})
-   - คนที่ได้บทบาท BODYGUARD (บอดี้การ์ด): รู้ว่าตัวเองคุ้มกันใครในแต่ละคืน (${JSON.stringify(bodyguardKnowledge || [])})
-   - คนที่ได้บทบาท VILLAGER (ชาวบ้าน) และ BEGGAR (ยาจก): ไม่รู้บทบาทใครเลย ต้องวิเคราะห์สดๆ จากเหตุการณ์จริง
-4. ให้ผู้เล่นคุยโต้ตอบกันเป็นลำดับต่อเนื่อง อ้างอิงสิ่งที่คนก่อนหน้าพูดได้`;
+   - WEREWOLF / WOLF_CUB [ได้แก่: ${wolvesNames}]: รู้จักกันเอง ทำตัวเนียนเป็นชาวบ้าน เบี่ยงประเด็นอย่างมีเหตุผล
+   - SEER: รู้ผลส่องลูกแก้วของตัวเองเท่านั้น (${JSON.stringify(seerKnowledge)})
+   - BODYGUARD: รู้ว่าตัวเองคุ้มกันใคร (${JSON.stringify(bodyguardKnowledge)})
+   - VILLAGER / BEGGAR: ไม่รู้บทบาทใครเลย วิเคราะห์สดจากสถานการณ์จริง`;
 
       const humanDisplayName = speakerName || "ผู้เล่น";
-      const targetMsgCount = Math.min(aliveAI.length, mode === "INITIAL_DAY" ? 5 : 3);
+      const targetMsgCount = Math.min(aliveAI.length, mode === "INITIAL_DAY" ? 4 : 3);
 
       let userPrompt = "";
       if (mode === "REPLY_TO_HUMAN") {
-        userPrompt = `ขณะนี้คือ กลางวันวันที่ ${dayNumber}
-ผู้มีชีวิตอยู่ตอนนี้ (${aliveAll.length} คน):
+        userPrompt = `กลางวันวันที่ ${dayNumber}
+ผู้มีชีวิตอยู่ (${aliveAll.length} คน):
 ${playerDescriptions}
 ผู้ที่ตายไปแล้ว: ${deadDescriptions}
-ประวัติโหวตรอบก่อน (ถ้ามี): ${JSON.stringify(previousVotes || [])}
 
-บทสนทนาก่อนหน้าในสภาวันนี้:
-${(recentTranscript || []).slice(-12).join("\n")}
+บทสนทนาล่าสุด:
+${(recentTranscript || []).slice(-10).join("\n")}
 
-ล่าสุด "${humanDisplayName}" เพิ่งพูดขึ้นมาว่า: "${humanMessage}"
-จงให้ผู้เล่น AI ที่ยังมีชีวิตอยู่ 1-${targetMsgCount} คน พูดวิเคราะห์และโต้ตอบคำพูดของ "${humanDisplayName}" อย่างเป็นธรรมชาติเหมือนคนเล่นจริง`;
+ล่าสุด "${humanDisplayName}" พูดว่า: "${humanMessage}"
+ให้ผู้เล่น AI 1-${targetMsgCount} คน พูดวิเคราะห์และโต้ตอบคำพูดนี้อย่างกระชับและเป็นธรรมชาติ (คนละ 1-2 ประโยค)`;
       } else if (mode === "CONTINUE_DEBATE") {
-        userPrompt = `ขณะนี้คือ กลางวันวันที่ ${dayNumber} (กำลังถกเถียงต่อเนื่องก่อนโหวต)
-ผู้มีชีวิตอยู่ตอนนี้ (${aliveAll.length} คน):
+        userPrompt = `กลางวันวันที่ ${dayNumber} (ถกเถียงต่อเนื่องก่อนโหวต)
+ผู้มีชีวิตอยู่ (${aliveAll.length} คน):
 ${playerDescriptions}
 
-บทสนทนาล่าสุดในวง:
-${(recentTranscript || []).slice(-12).join("\n")}
+บทสนทนาล่าสุด:
+${(recentTranscript || []).slice(-10).join("\n")}
 
-จงให้ผู้เล่น AI ที่ยังมีชีวิตอยู่ 1-${targetMsgCount} คน พูดวิเคราะห์ต่อยอดจากบทสนทนาล่าสุดแบบคนเล่นจริง`;
+ให้ผู้เล่น AI 1-${targetMsgCount} คน พูดวิเคราะห์ต่อยอดอย่างกระชับและเป็นธรรมชาติ (คนละ 1-2 ประโยค)`;
       } else {
-        userPrompt = `ขณะนี้เข้าสู่เช้าวันที่ ${dayNumber}
+        userPrompt = `เช้าวันที่ ${dayNumber}
 เหตุการณ์เมื่อคืน: ${
           nightVictimNames && nightVictimNames.length > 0
             ? `${nightVictimNames.join(" และ ")} ถูกหมาป่าสังหารเมื่อคืนนี้`
             : "เมื่อคืนไม่มีใครตายเลย! (บอดี้การ์ดน่าจะกันถูกคน)"
         }
-ผู้ที่ตายไปแล้วทั้งหมด: ${deadDescriptions}
-ประวัติการโหวตเมื่อวาน (ถ้ามี): ${JSON.stringify(previousVotes || [])}
+ผู้ที่ตายไปแล้ว: ${deadDescriptions}
+ประวัติโหวตเมื่อวาน: ${JSON.stringify(previousVotes || [])}
 
-ผู้มีชีวิตอยู่ในสภาตอนนี้ (${aliveAll.length} คน):
+ผู้มีชีวิตอยู่ (${aliveAll.length} คน):
 ${playerDescriptions}
 
-จงสร้างบทสนทนาช่วงเช้าจากผู้เล่น AI ที่ยังมีชีวิตอยู่ ${Math.min(aliveAI.length, 3)}-${targetMsgCount} คน โดยให้วิเคราะห์สถานการณ์จริงกันเองอย่างเป็นธรรมชาติ`;
+ให้ผู้เล่น AI ${Math.min(aliveAI.length, 3)}-${targetMsgCount} คน พูดวิเคราะห์สถานการณ์ช่วงเช้ากันเองอย่างกระชับเป็นธรรมชาติ (คนละ 1-2 ประโยค)`;
       }
 
-      const tier = mode === "REPLY_TO_HUMAN" ? "fast" : "primary";
-
       const result = await generateStructuredAIJson({
-        tier,
+        tier: "fast",
         systemInstruction: systemPrompt,
         userPrompt,
         responseSchema: {
@@ -957,7 +1236,7 @@ ${playerDescriptions}
           },
           required: ["messages"],
         },
-        jsonHint: `{ "messages": [ { "speakerId": "ai-1", "speakerName": "ชื่อผู้เล่น AI", "text": "ข้อความภาษาไทย", "tone": "ท่าทีสั้นๆ" } ] }`,
+        jsonHint: `{ "messages": [ { "speakerId": "ai-1", "speakerName": "ชื่อผู้เล่น AI", "text": "ข้อความภาษาไทย 1-2 ประโยค", "tone": "ท่าทีสั้นๆ" } ] }`,
       });
 
       if (!result) {
@@ -976,18 +1255,31 @@ ${playerDescriptions}
     }
   });
 
-  // Endpoint 2: Generate logical, INDEPENDENT AI Votes and Reasons in Thai (Multi-AI enabled)
+  // Endpoint 2: Generate logical, INDEPENDENT AI Votes and Reasons in Thai (Fast Multi-AI enabled)
   app.post("/api/werewolf/vote", async (req, res) => {
     try {
       const {
+        roomId,
         dayNumber,
-        players,
-        seerKnowledge,
-        bodyguardKnowledge,
+        players: reqPlayers,
+        seerKnowledge: reqSeerKnowledge,
+        bodyguardKnowledge: reqBgKnowledge,
         recentTranscript,
       } = req.body;
 
-      const aliveAll = (players || []).filter((p: any) => p.alive);
+      const authSnap =
+        roomId && rooms.get(String(roomId).trim().toUpperCase())?.gameSnapshot;
+      const players = Array.isArray(authSnap?.players)
+        ? authSnap.players
+        : reqPlayers || [];
+      const seerKnowledge = Array.isArray(authSnap?.seerKnowledge)
+        ? authSnap.seerKnowledge
+        : reqSeerKnowledge || [];
+      const bodyguardKnowledge = Array.isArray(authSnap?.bodyguardKnowledge)
+        ? authSnap.bodyguardKnowledge
+        : reqBgKnowledge || [];
+
+      const aliveAll = players.filter((p: any) => p.alive);
       const eligibleAI = aliveAll.filter(
         (p: any) => !p.isHuman && p.canVote !== false
       );
@@ -996,28 +1288,28 @@ ${playerDescriptions}
         return res.json({ fallback: false, data: { votes: [] } });
       }
 
-      const totalCount = Array.isArray(players) ? players.length : 10;
+      const totalCount = players.length || 10;
 
       const systemPrompt = `คุณคือสมองของผู้เล่น AI แต่ละคนในการตัดสินใจโหวตประหารในเกม Ultimate Werewolf ภาษาไทย (เริ่มเกม ${totalCount} คน)
 กฎเหล็กของการโหวต:
-1. ผู้เล่น AI แต่ละคนคิดวิเคราะห์และตัดสินใจโหวตด้วยตัวเองจากสิ่งที่คุยกันในสภาวันนี้ พิรุธของแต่ละคน และข้อมูลลับเฉพาะบทบาทของตัวเอง (ห้ามโหวตตามผู้เล่นมนุษย์แบบไร้เหตุผล)
+1. ผู้เล่น AI แต่ละคนคิดวิเคราะห์และตัดสินใจโหวตด้วยตัวเองจากบทสนทนาวันนี้และข้อมูลลับเฉพาะบทบาท (ห้ามโหวตตามผู้เล่นมนุษย์แบบไร้เหตุผล)
 2. ห้ามโหวตตัวเอง และไม่โหวตคนที่หงายการ์ดเป็นยาจกไปแล้ว
-3. พ่อหมาป่า (WEREWOLF) และ ลูกหมาป่า (WOLF_CUB): ห้ามโหวตกันเองเด็ดขาด ให้เลือกโหวตชาวบ้านที่กำลังตกเป็นผู้ต้องสงสัยในวงสนทนา หรือคนที่เป็นภัยต่อฝูง
-4. เทพพยากรณ์ (SEER): หากส่องเจอหมาป่าที่ยังมีชีวิตอยู่ (${JSON.stringify(seerKnowledge || [])}) จะโหวตหมาป่าคนนั้นทันที และจะไม่โหวตคนที่ตัวเองส่องแล้วว่าเป็นฝ่ายชาวบ้านเด็ดขาด
-5. บอดี้การ์ด (BODYGUARD): ใช้ข้อมูลคนที่ตนคุ้มกัน (${JSON.stringify(bodyguardKnowledge || [])}) ประกอบการตัดสินใจ
-6. เหตุผลการโหวตต้องอ้างอิงจากการวิเคราะห์บทสนทนาจริงอย่างเป็นธรรมชาติเหมือนคนเล่นจริง`;
+3. พ่อหมาป่า (WEREWOLF) และ ลูกหมาป่า (WOLF_CUB): ห้ามโหวตกันเองเด็ดขาด ให้โหวตชาวบ้านที่ดูน่าสงสัยหรือเป็นภัย
+4. เทพพยากรณ์ (SEER): หากส่องเจอหมาป่าที่ยังมีชีวิต (${JSON.stringify(seerKnowledge)}) จะโหวตหมาป่าคนนั้นทันที และไม่โหวตคนที่ส่องแล้วว่าเป็นชาวบ้าน
+5. บอดี้การ์ด (BODYGUARD): ใช้ข้อมูลคนที่คุ้มกัน (${JSON.stringify(bodyguardKnowledge)}) ประกอบการตัดสินใจ
+6. เขียนเหตุผลการโหวตให้สั้น กระชับ (ไม่เกิน 1 ประโยค) เป็นธรรมชาติเหมือนคนเล่นจริง`;
 
       const userPrompt = `กลางวันวันที่ ${dayNumber} - ช่วงลงมติโหวตประหาร
 รายชื่อผู้มีชีวิตอยู่:
 ${aliveAll.map((p: any) => `- ID: ${p.id} | ชื่อ: ${p.name} | บทบาทลับ: ${p.role} | สิทธิ์โหวต: ${p.canVote !== false ? "มี" : "เสียสิทธิ์โหวตแล้ว (ยาจก)"}`).join("\n")}
 
-บทสนทนาและการถกเถียงในวันนี้:
-${(recentTranscript || []).slice(-16).join("\n")}
+บทสนทนาวันนี้:
+${(recentTranscript || []).slice(-12).join("\n")}
 
-จงระบุว่าผู้เล่น AI ที่มีสิทธิ์โหวตแต่ละคน (${eligibleAI.map((p: any) => `${p.name} [${p.id}]`).join(", ")}) เลือกโหวตใคร (targetId) พร้อมเหตุผลวิเคราะห์สั้นๆ แบบคนเล่นจริง`;
+ระบุการโหวตของ AI ที่มีสิทธิ์โหวตทุกคน (${eligibleAI.map((p: any) => `${p.name} [${p.id}]`).join(", ")}) พร้อมเหตุผลสั้นๆ`;
 
       const result = await generateStructuredAIJson({
-        tier: "primary",
+        tier: "fast",
         systemInstruction: systemPrompt,
         userPrompt,
         responseSchema: {
@@ -1038,7 +1330,7 @@ ${(recentTranscript || []).slice(-16).join("\n")}
           },
           required: ["votes"],
         },
-        jsonHint: `{ "votes": [ { "voterId": "ai-1", "targetId": "ai-2", "reason": "เหตุผลสั้นๆ" } ] }`,
+        jsonHint: `{ "votes": [ { "voterId": "ai-1", "targetId": "ai-2", "reason": "เหตุผลสั้นๆ 1 ประโยค" } ] }`,
       });
 
       if (!result) {

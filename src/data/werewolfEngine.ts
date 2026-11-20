@@ -1,3 +1,11 @@
+import werewolfCardImg from '../assets/images/role_card_werewolf_1793769760093.jpg';
+import wolfCubCardImg from '../assets/images/role_card_wolf_cub_1793783231025.jpg';
+import seerCardImg from '../assets/images/role_card_seer_1793769760933.jpg';
+import bodyguardCardImg from '../assets/images/role_card_bodyguard_1793769761764.jpg';
+import beggarCardImg from '../assets/images/role_card_beggar_1793783231788.jpg';
+import villagerCardImg from '../assets/images/role_card_villager_1793769761504.jpg';
+import villageBackdropImg from '../assets/images/werewolf_village_backdrop_1793769757998.jpg';
+
 export type RoleType =
   | 'WEREWOLF'
   | 'WOLF_CUB'
@@ -34,7 +42,7 @@ export const ROLE_INFO: Record<RoleType, RoleMetadata> = {
     englishName: 'Father Werewolf',
     team: 'WEREWOLF',
     teamThai: 'ฝ่ายมนุษย์หมาป่า',
-    image: '/src/assets/images/role_card_werewolf_1793769760093.jpg',
+    image: werewolfCardImg,
     summary:
       'จ่าฝูงหมาป่า ออกล่าเหยื่อในยามวิกาลร่วมกับลูกหมาป่า หากลูกหมาป่าถูกประหารหรือตาย คืนถัดไปพ่อหมาป่าจะสามารถสังหารเหยื่อได้ถึง 2 คน!',
     nightPrompt:
@@ -47,7 +55,7 @@ export const ROLE_INFO: Record<RoleType, RoleMetadata> = {
     englishName: 'Wolf Cub',
     team: 'WEREWOLF',
     teamThai: 'ฝ่ายมนุษย์หมาป่า',
-    image: '/src/assets/images/role_card_wolf_cub_1793783231025.jpg',
+    image: wolfCubCardImg,
     summary:
       'ออกล่ายามวิกาลพร้อมพ่อหมาป่า หากคุณถูกโหวตประหารหรือตาย คืนถัดไปพ่อหมาป่าที่เหลืออยู่จะได้สิทธิ์สังหารเหยื่อถึง 2 คน!',
     nightPrompt:
@@ -60,7 +68,7 @@ export const ROLE_INFO: Record<RoleType, RoleMetadata> = {
     englishName: 'Seer',
     team: 'VILLAGE',
     teamThai: 'ฝ่ายชาวบ้าน',
-    image: '/src/assets/images/role_card_seer_1793769760933.jpg',
+    image: seerCardImg,
     summary:
       'ใช้ลูกแก้วพยากรณ์ตรวจสอบตัวตนของผู้เล่นได้คืนละ 1 คน ว่าอยู่ฝ่ายมนุษย์หมาป่า (พ่อหมาป่า/ลูกหมาป่า) หรือฝ่ายชาวบ้าน',
     nightPrompt:
@@ -73,7 +81,7 @@ export const ROLE_INFO: Record<RoleType, RoleMetadata> = {
     englishName: 'Bodyguard',
     team: 'VILLAGE',
     teamThai: 'ฝ่ายชาวบ้าน',
-    image: '/src/assets/images/role_card_bodyguard_1793769761764.jpg',
+    image: bodyguardCardImg,
     summary:
       'เลือกคุ้มกันผู้เล่นได้คืนละ 1 คน (รวมถึงตัวเองได้) หากเป้าหมายถูกหมาป่าโจมตีในคืนนั้นจะรอดตาย (ห้ามปกป้องคนเดิม 2 คืนติดกัน)',
     nightPrompt:
@@ -86,7 +94,7 @@ export const ROLE_INFO: Record<RoleType, RoleMetadata> = {
     englishName: 'Beggar / Idiot',
     team: 'VILLAGE',
     teamThai: 'ฝ่ายชาวบ้าน',
-    image: '/src/assets/images/role_card_beggar_1793783231788.jpg',
+    image: beggarCardImg,
     summary:
       'ไม่มีแอ็กชันตอนกลางคืน แต่หากถูกชาวบ้านโหวตประหารในตอนกลางวัน การ์ดของคุณจะถูกเปิดเผยและคุณจะรอดตายทันที! (แลกกับการเสียสิทธิ์โหวตไปตลอดเกม)',
     nightPrompt:
@@ -99,7 +107,7 @@ export const ROLE_INFO: Record<RoleType, RoleMetadata> = {
     englishName: 'Villager',
     team: 'VILLAGE',
     teamThai: 'ฝ่ายชาวบ้าน',
-    image: '/src/assets/images/role_card_villager_1793769761504.jpg',
+    image: villagerCardImg,
     summary:
       'ไม่มีพลังพิเศษในตอนกลางคืน อาวุธเดียวของคุณคือการจับพิรุธ วิเคราะห์ตรรกะ และลงคะแนนโหวตในตอนกลางวัน',
     nightPrompt:
@@ -108,8 +116,7 @@ export const ROLE_INFO: Record<RoleType, RoleMetadata> = {
   },
 };
 
-export const VILLAGE_BACKDROP_IMAGE =
-  '/src/assets/images/werewolf_village_backdrop_1793769757998.jpg';
+export const VILLAGE_BACKDROP_IMAGE = villageBackdropImg;
 
 export interface HumanParticipant {
   id: string;
