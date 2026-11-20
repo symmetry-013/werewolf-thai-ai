@@ -1,21 +1,36 @@
 services:
   - type: web
-    name: ultimate-werewolf-thai
+    name: govai-3d-agent-orchestrator
     runtime: node
-    plan: free
+    plan: starter
     buildCommand: npm install && npm run build
     startCommand: npx tsx server.ts
-    healthCheckPath: /health
     envVars:
       - key: NODE_ENV
         value: production
+      - key: PORT
+        value: 3000
+      - key: SERVER_HOST
+        value: 0.0.0.0
+      - key: ENABLE_OS_BRIDGE
+        value: "false"
       - key: GEMINI_API_KEY
         sync: false
       - key: GEMINI_MODEL_PRIMARY
         value: gemini-2.5-pro
       - key: GEMINI_MODEL_FAST
         value: gemini-2.5-flash
-      - key: AI_PROVIDER_ORDER
-        value: gemini,openai,openrouter,groq,deepseek,anthropic
-      - key: AI_MIX_PROVIDERS
-        value: "false"
+      - key: API_AUTH_TOKEN
+        sync: false
+      - key: MONGO_URI
+        sync: false
+      - key: TELERID_USERNAME
+        sync: false
+      - key: TELERID_PASSWORD
+        sync: false
+      - key: TELERID_API_TOKEN
+        sync: false
+      - key: RENDER_DEPLOY_HOOK_URL
+        sync: false
+      - key: LINE_CHANNEL_ACCESS_TOKEN
+        sync: false
