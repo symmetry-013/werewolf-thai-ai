@@ -2,6 +2,8 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   Ban,
   Check,
+  ChevronDown,
+  ChevronUp,
   Clock,
   Copy,
   Crosshair,
@@ -225,6 +227,7 @@ export default function App() {
 
   const [activeSpeakerId, setActiveSpeakerId] = useState<string | null>(null);
   const [showRoleCardModal, setShowRoleCardModal] = useState<boolean>(false);
+  const [showMobilePlayers, setShowMobilePlayers] = useState<boolean>(false);
   const [roleCardImgError, setRoleCardImgError] = useState<boolean>(false);
   const [muted, setMuted] = useState<boolean>(false);
   const [impactTrigger, setImpactTrigger] = useState<number>(0);
@@ -3426,6 +3429,86 @@ export default function App() {
                 </button>
               </div>
             </div>
+            {/* Compact Animation Preview Section (Start/Lobby Screen ONLY — completely hidden once game starts) */}
+            <div className="bg-[#0B1324]/90 border border-slate-800/90 rounded-2xl p-3.5 md:p-4 space-y-2.5">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <span className="text-xs font-bold text-slate-200 flex items-center gap-1.5">
+                  <Sparkles className="w-3.5 h-3.5 text-amber-400" />
+                  <span>ทดสอบอนิเมชัน (Test Animations)</span>
+                </span>
+                <span className="text-[11px] text-slate-400">
+                  แสดงเฉพาะหน้า Lobby ก่อนเริ่มเกม (ซ่อนอัตโนมัติเมื่อเริ่มเล่น)
+                </span>
+              </div>
+              <div className="flex flex-wrap items-center gap-1.5">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setBodyguardOverlay(null);
+                    setDeathOverlay('WOLF_KILL');
+                  }}
+                  className="min-h-[38px] px-3 py-1.5 rounded-lg bg-red-950/80 hover:bg-red-800/90 text-red-200 border border-red-500/40 text-xs font-semibold transition-colors cursor-pointer flex items-center gap-1.5"
+                >
+                  <Skull className="w-3.5 h-3.5 text-red-400" />
+                  <span>Test Wolf Kill</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setBodyguardOverlay(null);
+                    setDeathOverlay('DAY_EXECUTION');
+                  }}
+                  className="min-h-[38px] px-3 py-1.5 rounded-lg bg-orange-950/80 hover:bg-orange-800/90 text-amber-200 border border-amber-500/40 text-xs font-semibold transition-colors cursor-pointer flex items-center gap-1.5"
+                >
+                  <Flame className="w-3.5 h-3.5 text-amber-400" />
+                  <span>Test Execution</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setDeathOverlay(null);
+                    setBodyguardOverlay('WOLF_BLOCKED');
+                  }}
+                  className="min-h-[38px] px-3 py-1.5 rounded-lg bg-sky-950/80 hover:bg-sky-800/90 text-sky-200 border border-sky-400/40 text-xs font-semibold transition-colors cursor-pointer flex items-center gap-1.5"
+                >
+                  <Shield className="w-3.5 h-3.5 text-sky-300" />
+                  <span>Test: Wolf Blocked</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setDeathOverlay(null);
+                    setBodyguardOverlay('VICTIM_SAVED');
+                  }}
+                  className="min-h-[38px] px-3 py-1.5 rounded-lg bg-amber-950/80 hover:bg-amber-800/90 text-amber-200 border border-amber-400/40 text-xs font-semibold transition-colors cursor-pointer flex items-center gap-1.5"
+                >
+                  <Shield className="w-3.5 h-3.5 text-amber-300" />
+                  <span>Test: Victim Saved</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setDeathOverlay(null);
+                    setBodyguardOverlay('BG_SUCCESS');
+                  }}
+                  className="min-h-[38px] px-3 py-1.5 rounded-lg bg-emerald-950/80 hover:bg-emerald-800/90 text-emerald-200 border border-emerald-400/40 text-xs font-semibold transition-colors cursor-pointer flex items-center gap-1.5"
+                >
+                  <Shield className="w-3.5 h-3.5 text-emerald-300" />
+                  <span>Test: BG Success</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setDeathOverlay(null);
+                    setBodyguardOverlay('BG_FAILED');
+                  }}
+                  className="min-h-[38px] px-3 py-1.5 rounded-lg bg-slate-900/90 hover:bg-slate-800 text-slate-300 border border-slate-600/50 text-xs font-semibold transition-colors cursor-pointer flex items-center gap-1.5"
+                >
+                  <Shield className="w-3.5 h-3.5 text-slate-400" />
+                  <span>Test: BG Failed</span>
+                </button>
+              </div>
+            </div>
           </div>
 
           <div className="text-center text-xs text-slate-400 font-mono">
@@ -3523,44 +3606,45 @@ export default function App() {
       {shellState !== 'TITLE_SCREEN' &&
         shellState !== 'FRIEND_JOIN' &&
         shellState !== 'ROLE_REVEAL' && (
-          <div className="absolute inset-0 z-10 pointer-events-none flex flex-col justify-between p-2 pb-12 sm:p-3 sm:pb-12 md:p-5 md:pb-14">
-            {/* Top Perimeter Status Bar */}
-            <div className="shrink-0 flex flex-wrap items-center justify-between gap-2 md:gap-3 pointer-events-auto bg-[#0B1324]/95 border border-slate-800/90 rounded-xl px-3 py-2 md:px-4 md:py-2.5 shadow-lg">
-              <div className="flex items-center gap-3 flex-wrap">
-                <div className="flex items-center gap-2">
+          <div className="absolute inset-0 z-10 pointer-events-none flex flex-col justify-between p-1.5 sm:p-2.5 md:p-5">
+            {/* Top Perimeter Status Bar — Ultra-Slim Single Row on Mobile (< 768px), Full Bar on Desktop (>= 768px) */}
+            <div className="shrink-0 flex items-center justify-between gap-1.5 md:gap-3 pointer-events-auto bg-[#0B1324]/95 border border-slate-800/90 rounded-xl px-2.5 py-1.5 md:px-4 md:py-2.5 shadow-lg">
+              {/* Left: Phase/Day Status (Slim on Mobile, Full Title + Stats on Desktop) */}
+              <div className="flex items-center gap-2 md:gap-3 min-w-0">
+                <div className="flex items-center gap-1.5 shrink-0">
                   {phase === 'NIGHT_ACTION' ? (
                     <Moon className="w-4 h-4 text-red-400 shrink-0" />
                   ) : (
                     <Sun className="w-4 h-4 text-amber-400 shrink-0" />
                   )}
-                  <span className="font-bold text-sm md:text-base text-white whitespace-nowrap">
+                  <span className="hidden md:inline font-bold text-base text-white whitespace-nowrap">
                     หมู่บ้านจันทร์ทมิฬ
                   </span>
                 </div>
-                <span className="text-slate-600" aria-hidden="true">
+                <span className="hidden md:inline text-slate-600" aria-hidden="true">
                   ·
                 </span>
-                <div className="text-xs md:text-sm text-amber-300 font-medium font-mono tabular-nums whitespace-nowrap">
+                <div className="text-xs md:text-sm text-amber-300 font-semibold font-mono tabular-nums truncate">
                   {phase === 'NIGHT_ACTION' && `คืนที่ ${dayCount} · ยามวิกาล`}
-                  {phase === 'DAY_DISCUSSION' && `วันที่ ${dayCount} · ช่วงถกเถียง`}
-                  {phase === 'DAY_VOTING' && `วันที่ ${dayCount} · ช่วงโหวตประหาร`}
+                  {phase === 'DAY_DISCUSSION' && `วันที่ ${dayCount} · ถกเถียง`}
+                  {phase === 'DAY_VOTING' && `วันที่ ${dayCount} · โหวตประหาร`}
                   {phase === 'DAY_RESULT' && (
-                    <span className="inline-flex items-center gap-2">
-                      <span>วันที่ {dayCount} · รอเข้าคืนที่ {dayCount + 1}</span>
+                    <span className="inline-flex items-center gap-1.5">
+                      <span>วันที่ {dayCount}</span>
                       {dayResultSecondsLeft !== null && (
-                        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-amber-500/20 border border-amber-400/50 text-amber-200 font-bold">
+                        <span className="inline-flex items-center gap-1 text-amber-200 font-bold">
                           <Clock className="w-3 h-3" />
                           <span>{formatCountdown(dayResultSecondsLeft)}</span>
                         </span>
                       )}
                     </span>
                   )}
-                  {phase === 'GAME_OVER' && `จบเกม · สรุปผล`}
+                  {phase === 'GAME_OVER' && `จบเกม`}
                 </div>
-                <span className="hidden sm:inline text-slate-600" aria-hidden="true">
+                <span className="hidden lg:inline text-slate-600" aria-hidden="true">
                   ·
                 </span>
-                <div className="hidden sm:flex items-center gap-2 text-xs text-slate-300 font-mono tabular-nums">
+                <div className="hidden lg:flex items-center gap-2 text-xs text-slate-300 font-mono tabular-nums shrink-0">
                   <span>
                     ผู้รอดชีวิต {alivePlayers.length}/{players.length} คน
                   </span>
@@ -3576,30 +3660,60 @@ export default function App() {
                 </div>
               </div>
 
-              <div className="flex items-center gap-2 flex-wrap">
+              {/* Right: Compact Action Controls */}
+              <div className="flex items-center gap-1 md:gap-2 shrink-0">
+                {/* Mobile ONLY: Collapsible Player List Drawer Toggle */}
+                <button
+                  type="button"
+                  onClick={() => setShowMobilePlayers((v) => !v)}
+                  className={`md:hidden min-h-[38px] px-2.5 py-1.5 rounded-lg text-[11px] font-bold flex items-center gap-1 border transition-colors cursor-pointer whitespace-nowrap shrink-0 ${
+                    showMobilePlayers
+                      ? 'bg-amber-500/20 text-amber-300 border-amber-400/60'
+                      : 'bg-slate-800/90 text-slate-200 border-slate-700 hover:bg-slate-700'
+                  }`}
+                  title="ซ่อน/แสดงรายชื่อผู้เล่น"
+                  aria-expanded={showMobilePlayers}
+                >
+                  <Users className="w-3.5 h-3.5 text-amber-400" />
+                  <span className="tabular-nums">
+                    ผู้เล่น ({alivePlayers.length}/{players.length})
+                  </span>
+                  {showMobilePlayers ? (
+                    <ChevronUp className="w-3.5 h-3.5 text-amber-300" />
+                  ) : (
+                    <ChevronDown className="w-3.5 h-3.5 text-slate-400" />
+                  )}
+                </button>
+
+                {/* Peek Own Secret Role Card Button (Compact on Mobile, Detailed on Desktop) */}
                 {myPlayer ? (
                   <button
+                    type="button"
                     onClick={() => {
                       setRoleCardImgError(false);
                       setShowRoleCardModal(true);
                     }}
-                    className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold rounded-lg bg-slate-800 hover:bg-slate-700 text-amber-300 border border-amber-500/30 transition-colors cursor-pointer whitespace-nowrap shrink-0"
+                    className="min-h-[38px] md:min-h-0 flex items-center gap-1.5 px-2.5 md:px-3 py-1.5 text-[11px] md:text-xs font-semibold rounded-lg bg-slate-800 hover:bg-slate-700 text-amber-300 border border-amber-500/35 transition-colors cursor-pointer whitespace-nowrap shrink-0"
+                    title="ดูการ์ดบทบาทลับของคุณ"
                   >
-                    <Eye className="w-3.5 h-3.5" />
-                    <span>
+                    <Eye className="w-3.5 h-3.5 shrink-0" />
+                    <span className="md:hidden">การ์ด</span>
+                    <span className="hidden md:inline">
                       การ์ดของ {myPlayer.shortName}:{' '}
                       {ROLE_INFO[myPlayer.role].thaiName}
                     </span>
                   </button>
                 ) : (
-                  <span className="px-3 py-1.5 text-xs font-semibold rounded-lg bg-slate-900 text-slate-300 border border-slate-700 whitespace-nowrap shrink-0">
+                  <span className="hidden md:inline-block px-3 py-1.5 text-xs font-semibold rounded-lg bg-slate-900 text-slate-300 border border-slate-700 whitespace-nowrap shrink-0">
                     โหมดผู้ชม (รอจบรอบนี้)
                   </span>
                 )}
 
+                {/* Desktop ONLY: Copy Invite Link */}
                 <button
+                  type="button"
                   onClick={handleCopyInviteLink}
-                  className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg bg-slate-800/80 hover:bg-slate-700 text-slate-200 border border-slate-700 transition-colors cursor-pointer whitespace-nowrap shrink-0"
+                  className="hidden md:flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg bg-slate-800/80 hover:bg-slate-700 text-slate-200 border border-slate-700 transition-colors cursor-pointer whitespace-nowrap shrink-0"
                   title="คัดลอกลิงก์ชวนเพื่อนเข้าห้อง"
                 >
                   {copiedInviteLink ? (
@@ -3612,21 +3726,11 @@ export default function App() {
                   </span>
                 </button>
 
+                {/* Essential Audio Mute/Unmute */}
                 <button
-                  onClick={() => {
-                    setShellState('TITLE_SCREEN');
-                    sendWsMessage({ type: 'RETURN_TO_LOBBY' });
-                  }}
-                  className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg bg-slate-800/80 hover:bg-slate-700 text-slate-200 border border-slate-700 transition-colors cursor-pointer whitespace-nowrap shrink-0"
-                  title="ตั้งค่าจำนวนผู้เล่น / เปลี่ยนชื่อ / สุ่มเกมใหม่"
-                >
-                  <RotateCcw className="w-3.5 h-3.5 text-amber-400" />
-                  <span className="hidden xl:inline">ตั้งค่าห้อง / เริ่มใหม่</span>
-                </button>
-
-                <button
+                  type="button"
                   onClick={toggleMute}
-                  className="p-2 rounded-lg bg-slate-800/80 hover:bg-slate-700 text-slate-300 hover:text-white border border-slate-700 transition-colors cursor-pointer"
+                  className="min-h-[38px] min-w-[38px] md:min-h-0 md:min-w-0 p-2 rounded-lg bg-slate-800/80 hover:bg-slate-700 text-slate-300 hover:text-white border border-slate-700 transition-colors cursor-pointer flex items-center justify-center shrink-0"
                   title={muted ? 'เปิดเสียง' : 'ปิดเสียง'}
                 >
                   {muted ? (
@@ -3636,41 +3740,129 @@ export default function App() {
                   )}
                 </button>
 
+                {/* Essential Restart / Lobby */}
                 <button
+                  type="button"
+                  onClick={() => {
+                    setShellState('TITLE_SCREEN');
+                    sendWsMessage({ type: 'RETURN_TO_LOBBY' });
+                  }}
+                  className="min-h-[38px] min-w-[38px] md:min-h-0 md:min-w-0 flex items-center justify-center gap-1.5 p-2 md:px-3 md:py-1.5 text-xs font-medium rounded-lg bg-slate-800/80 hover:bg-slate-700 text-slate-200 border border-slate-700 transition-colors cursor-pointer whitespace-nowrap shrink-0"
+                  title="ตั้งค่าห้อง / เริ่มเกมใหม่"
+                >
+                  <RotateCcw className="w-3.5 h-3.5 text-amber-400" />
+                  <span className="hidden xl:inline">ตั้งค่าห้อง / เริ่มใหม่</span>
+                </button>
+
+                {/* Desktop ONLY: Download Code */}
+                <button
+                  type="button"
                   onClick={openDownloadModal}
-                  className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg bg-slate-800/80 hover:bg-slate-700 text-slate-200 border border-slate-700 transition-colors cursor-pointer whitespace-nowrap shrink-0"
+                  className="hidden md:flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg bg-slate-800/80 hover:bg-slate-700 text-slate-200 border border-slate-700 transition-colors cursor-pointer whitespace-nowrap shrink-0"
                   title="ดาวน์โหลดไฟล์โปรเจกต์"
                 >
                   <Download className="w-3.5 h-3.5 text-amber-400" />
-                  <span className="hidden md:inline">ดาวน์โหลดโค้ด</span>
+                  <span className="hidden lg:inline">ดาวน์โหลดโค้ด</span>
                 </button>
 
+                {/* Desktop ONLY: Rules / Pause Menu */}
                 <button
+                  type="button"
                   onClick={() => setShellState('PAUSED')}
-                  className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg bg-slate-800/80 hover:bg-slate-700 text-slate-200 border border-slate-700 transition-colors cursor-pointer whitespace-nowrap shrink-0"
+                  className="hidden md:flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg bg-slate-800/80 hover:bg-slate-700 text-slate-200 border border-slate-700 transition-colors cursor-pointer whitespace-nowrap shrink-0"
+                  title="กติกา / เมนู"
                 >
                   <Pause className="w-3.5 h-3.5" />
-                  <span className="hidden md:inline">กติกา / เมนู</span>
+                  <span className="hidden lg:inline">กติกา / เมนู</span>
                 </button>
               </div>
             </div>
 
+            {/* Mobile ONLY: Collapsible Compact Player List Drawer (Slim horizontal chips — collapses completely when closed) */}
+            {showMobilePlayers && (
+              <div className="md:hidden shrink-0 mt-1.5 pointer-events-auto bg-[#0B1324]/95 border border-slate-800 rounded-xl px-2.5 py-2 shadow-xl space-y-1.5">
+                <div className="flex items-center justify-between text-[11px] text-slate-400">
+                  <span className="font-semibold text-slate-200">
+                    รายชื่อผู้เล่น ({alivePlayers.length}/{players.length} รอดชีวิต)
+                    {doubleKillNextNight ? ' · 🔥 ฆ่า 2 ศพ!' : ''}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => setShowMobilePlayers(false)}
+                    className="text-amber-300 font-semibold px-1.5 py-0.5 rounded hover:bg-slate-800 cursor-pointer"
+                  >
+                    ซ่อน
+                  </button>
+                </div>
+                <div className="flex flex-wrap gap-1">
+                  {players.map((p, index) => {
+                    const isSelected =
+                      selectedTargetId === p.id || secondTargetId === p.id;
+                    const isFellow = fellowWolves.some((w) => w.id === p.id);
+                    const seerStat = seerKnownMap[p.id];
+                    const isCurrentViewer = Boolean(myPlayer && p.id === myPlayer.id);
+                    const isReadyInPhase =
+                      p.alive &&
+                      (phase === 'DAY_DISCUSSION' || phase === 'DAY_RESULT') &&
+                      phaseReadyIds.includes(p.id);
+
+                    return (
+                      <button
+                        key={p.id}
+                        type="button"
+                        onClick={() => handleSelectPlayerOnCanvas(p.id)}
+                        disabled={!p.alive}
+                        className={`inline-flex items-center gap-1 px-2 py-1 rounded-lg text-[11px] font-semibold border transition-colors cursor-pointer ${
+                          !p.alive
+                            ? 'bg-slate-950/60 border-slate-800/80 text-slate-500 line-through opacity-55 cursor-not-allowed'
+                            : isSelected
+                            ? 'bg-amber-500/25 border-amber-400 text-amber-200'
+                            : isFellow
+                            ? 'bg-red-950/50 border-red-500/50 text-red-200'
+                            : isCurrentViewer
+                            ? 'bg-sky-950/50 border-sky-500/50 text-sky-200'
+                            : 'bg-slate-900/90 border-slate-700/80 text-slate-200 hover:border-slate-500'
+                        }`}
+                      >
+                        {!p.alive ? (
+                          <Skull className="w-3 h-3 text-red-400 shrink-0" />
+                        ) : (
+                          <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 shrink-0" />
+                        )}
+                        <span className="truncate max-w-[96px]">
+                          {index + 1}. {p.shortName}
+                        </span>
+                        {isSelected && <Check className="w-3 h-3 text-amber-300 shrink-0" />}
+                        {isReadyInPhase && (
+                          <span className="text-[10px] text-emerald-400">✓</span>
+                        )}
+                        {isFellow && <span className="text-[10px]">🐺</span>}
+                        {seerStat !== undefined && (
+                          <span
+                            className={`text-[10px] font-bold ${
+                              seerStat ? 'text-red-400' : 'text-emerald-400'
+                            }`}
+                          >
+                            {seerStat ? '🐺' : '✓'}
+                          </span>
+                        )}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+
             {/* Main Split Playfield */}
-            <div className="flex-1 min-h-0 flex flex-col md:flex-row items-stretch justify-between gap-2 md:gap-4 mt-2 md:mt-3">
-              {/* Left Side: Player Roster Strip (Horizontal swipe bar on mobile/tablet, bottom grid on desktop) */}
-              <div className="shrink-0 md:flex-1 flex flex-col md:justify-end pointer-events-none">
-                <div className="pointer-events-auto bg-[#0B1324]/95 border border-slate-800/90 rounded-xl p-2 md:p-3 shadow-lg">
-                  <div className="flex items-center justify-between gap-2 mb-1.5 md:mb-2">
-                    <span className="text-[11px] md:text-xs font-semibold text-slate-300 truncate">
-                      ผู้เล่น {players.length} คน{' '}
-                      <span className="hidden md:inline">
-                        รอบโต๊ะสภา (คลิกเลือกเป้าหมายได้ทั้งบนโต๊ะหรือปุ่มด้านล่าง)
-                      </span>
-                      <span className="md:hidden text-slate-400">
-                        (เลื่อนซ้าย-ขวาเพื่อดู)
-                      </span>
+            <div className="flex-1 min-h-0 flex flex-col md:flex-row items-stretch justify-between gap-1.5 md:gap-4 mt-1.5 md:mt-3">
+              {/* Desktop ONLY: Left Side Player Roster Strip anchored at the bottom of the Village Canvas */}
+              <div className="hidden md:flex md:flex-1 flex-col justify-end pointer-events-none">
+                <div className="pointer-events-auto bg-[#0B1324]/95 border border-slate-800/90 rounded-xl p-3 shadow-lg">
+                  <div className="flex items-center justify-between gap-2 mb-2">
+                    <span className="text-xs font-semibold text-slate-300 truncate">
+                      ผู้เล่นทั้ง {players.length} คนรอบโต๊ะสภา (คลิกเลือกเป้าหมายได้ทั้งบนโต๊ะหรือปุ่มด้านล่าง)
                     </span>
-                    <span className="text-[11px] md:text-xs text-amber-300 font-mono tabular-nums truncate shrink-0 max-w-[52%]">
+                    <span className="text-xs text-amber-300 font-mono tabular-nums truncate shrink-0 max-w-[52%]">
                       {selectedTargetId === ABSTAIN_VOTE_ID
                         ? 'งดออกเสียง'
                         : selectedTargetId
@@ -3683,7 +3875,7 @@ export default function App() {
                     </span>
                   </div>
 
-                  <div className="flex md:grid md:grid-cols-2 lg:grid-cols-5 gap-1.5 overflow-x-auto md:overflow-visible no-scrollbar pb-0.5 md:pb-0">
+                  <div className="grid md:grid-cols-2 lg:grid-cols-5 gap-1.5">
                     {players.map((p, index) => {
                       const selectable = isTargetSelectable(p);
                       const isSelected =
@@ -3705,7 +3897,7 @@ export default function App() {
                           key={p.id}
                           onClick={() => handleSelectPlayerOnCanvas(p.id)}
                           disabled={!p.alive}
-                          className={`min-w-[116px] md:min-w-0 shrink-0 min-h-[44px] text-left px-2.5 py-1.5 rounded-lg border transition-all cursor-pointer ${
+                          className={`min-h-[44px] text-left px-2.5 py-1.5 rounded-lg border transition-all cursor-pointer ${
                             !p.alive
                               ? 'bg-slate-950/60 border-slate-900 opacity-45 cursor-not-allowed'
                               : signaledByMe && signaledByPartner
@@ -3791,14 +3983,14 @@ export default function App() {
                 </div>
               </div>
 
-              {/* Right Side: Thai Moderator & Natural Player Discussion Console (+ Secret Wolf Chat Tab for Werewolves ONLY) */}
-              <div className="w-full md:w-[400px] lg:w-[470px] xl:w-[530px] flex-1 min-h-0 md:flex-none md:h-full flex flex-col pointer-events-auto bg-[#0B1324]/95 border border-slate-800/90 rounded-xl shadow-2xl overflow-hidden">
+              {/* Right Side (Full Height >=75% on Mobile): Clean LINE/Messenger-style Group Chat + Compact Sticky Bottom Action Bar */}
+              <div className="w-full md:w-[420px] lg:w-[480px] xl:w-[540px] flex-1 min-h-0 md:flex-none md:h-full flex flex-col pointer-events-auto bg-[#0A1120]/96 border border-slate-800/90 rounded-xl shadow-2xl overflow-hidden">
                 {amWerewolf ? (
-                  <div className="shrink-0 px-2.5 md:px-3 py-2 border-b border-slate-800 flex items-center gap-2 bg-[#0F172A]">
+                  <div className="shrink-0 px-2 py-1.5 md:px-3 md:py-2 border-b border-slate-800 flex items-center gap-1.5 md:gap-2 bg-[#0F172A]">
                     <button
                       type="button"
                       onClick={() => setActiveChatTab('PUBLIC')}
-                      className={`flex-1 min-h-[40px] py-1.5 px-2.5 rounded-lg text-xs font-bold flex items-center justify-center gap-1.5 transition-colors cursor-pointer ${
+                      className={`flex-1 min-h-[36px] md:min-h-[40px] py-1 px-2 rounded-lg text-xs font-bold flex items-center justify-center gap-1.5 transition-colors cursor-pointer ${
                         activeChatTab === 'PUBLIC'
                           ? 'bg-amber-500/20 text-amber-300 border border-amber-400/50'
                           : 'bg-slate-900/80 text-slate-400 border border-slate-800 hover:text-slate-200'
@@ -3813,14 +4005,14 @@ export default function App() {
                         setActiveChatTab('WOLF');
                         setUnreadWolfCount(0);
                       }}
-                      className={`flex-1 min-h-[40px] py-1.5 px-2.5 rounded-lg text-xs font-bold flex items-center justify-center gap-1.5 transition-colors cursor-pointer relative ${
+                      className={`flex-1 min-h-[36px] md:min-h-[40px] py-1 px-2 rounded-lg text-xs font-bold flex items-center justify-center gap-1.5 transition-colors cursor-pointer relative ${
                         activeChatTab === 'WOLF'
                           ? 'bg-red-950/80 text-red-200 border border-red-500/60 shadow-[0_0_12px_rgba(239,68,68,0.2)]'
                           : 'bg-slate-900/80 text-red-300/80 border border-red-900/40 hover:border-red-500/50'
                       }`}
                     >
                       <Flame className="w-3.5 h-3.5 text-red-400" />
-                      <span>แชทลับฝูงหมาป่า</span>
+                      <span>แชทลับหมาป่า</span>
                       {unreadWolfCount > 0 && activeChatTab !== 'WOLF' && (
                         <span className="ml-1 px-1.5 py-0.2 rounded bg-red-500 text-white text-[10px] font-mono">
                           {unreadWolfCount}
@@ -3829,11 +4021,12 @@ export default function App() {
                     </button>
                   </div>
                 ) : (
-                  <div className="shrink-0 px-3.5 md:px-4 py-2.5 md:py-3 border-b border-slate-800 flex items-center justify-between bg-[#0F172A]">
+                  /* Desktop ONLY Chat Header — hidden on mobile (< 768px) to maximize chat reading space */
+                  <div className="hidden md:flex shrink-0 px-4 py-2.5 border-b border-slate-800 items-center justify-between bg-[#0F172A]">
                     <div className="flex items-center gap-2">
                       <MessageSquare className="w-4 h-4 text-amber-400" />
                       <h2 className="text-sm font-bold text-white">
-                        วงสนทนาสภาหมู่บ้านและผู้ดำเนินเกม (Moderator)
+                        วงสนทนาสภาหมู่บ้าน
                       </h2>
                     </div>
                     <span className="text-xs text-slate-400 font-mono tabular-nums">
@@ -3844,20 +4037,18 @@ export default function App() {
 
                 {amWerewolf && activeChatTab === 'WOLF' ? (
                   <div className="flex-1 min-h-0 flex flex-col bg-[#140A10]/90">
-                    <div className="px-3.5 py-2 bg-red-950/60 border-b border-red-900/60 text-[11px] text-red-200 flex items-center justify-between gap-2">
-                      <span>
-                        🐺 ช่องกระซิบลับเฉพาะฝูงหมาป่า · ชาวบ้านและบทบาทอื่นไม่มีทางเห็น
-                      </span>
+                    <div className="shrink-0 px-3 py-1.5 bg-red-950/60 border-b border-red-900/60 text-[11px] text-red-200">
+                      🐺 ช่องกระซิบลับเฉพาะฝูงหมาป่า · ชาวบ้านไม่เห็น
                     </div>
 
-                    <div className="flex-1 overflow-y-auto p-3.5 space-y-2.5">
+                    <div className="flex-1 min-h-0 overflow-y-auto px-3 py-2.5 space-y-2.5">
                       {wolfMessages.length === 0 ? (
-                        <div className="rounded-xl p-4 bg-red-950/25 border border-red-900/40 text-xs text-red-200/80 leading-relaxed text-center space-y-1">
+                        <div className="rounded-xl p-3.5 bg-red-950/25 border border-red-900/40 text-xs text-red-200/80 leading-relaxed text-center space-y-1">
                           <p className="font-bold text-red-300">
                             ยังไม่มีข้อความในช่องลับฝูงหมาป่า
                           </p>
                           <p>
-                            คุณสามารถพิมพ์วางแผนกับเพื่อนหมาป่าได้ทั้งกลางคืนและกลางวัน รวมถึงกดเลือกเหยื่อด้านล่างเพื่อส่งซิกให้เห็นตรงกันทั้ง 2 ตัว
+                            พิมพ์วางแผนกับเพื่อนหมาป่าได้ตลอดเวลา หรือกดเลือกเหยื่อด้านล่างเพื่อส่งซิกให้ตรงกัน
                           </p>
                         </div>
                       ) : (
@@ -3866,21 +4057,25 @@ export default function App() {
                           return (
                             <div
                               key={wm.id}
-                              className={`rounded-xl p-3 text-xs md:text-sm leading-relaxed border ${
-                                isMe
-                                  ? 'bg-red-900/40 border-red-500/50 text-red-50 ml-5'
-                                  : 'bg-[#1F0E16] border-red-900/70 text-red-100 mr-5'
+                              className={`flex flex-col ${
+                                isMe ? 'items-end' : 'items-start'
                               }`}
                             >
-                              <div className="flex items-center justify-between gap-2 text-[11px] mb-1">
+                              <div className="flex items-center gap-1.5 px-1 mb-0.5 text-[11px]">
                                 <span className="font-bold text-red-300">
                                   🐺 {wm.senderName}
                                 </span>
-                                <span className="font-mono text-[10px] text-red-400/70">
-                                  {wm.phaseLabel} · {wm.timestamp}
+                                <span className="text-[10px] text-red-400/70 font-mono tabular-nums">
+                                  {wm.timestamp}
                                 </span>
                               </div>
-                              <div className="whitespace-pre-line select-text">
+                              <div
+                                className={`max-w-[86%] px-3.5 py-2 text-[13.5px] md:text-sm leading-relaxed whitespace-pre-line select-text border ${
+                                  isMe
+                                    ? 'bg-red-800/45 border-red-500/50 text-red-50 rounded-2xl rounded-tr-sm'
+                                    : 'bg-[#210F18] border-red-900/70 text-red-100 rounded-2xl rounded-tl-sm'
+                                }`}
+                              >
                                 {wm.text}
                               </div>
                             </div>
@@ -3889,7 +4084,7 @@ export default function App() {
                       )}
 
                       {isGeneratingWolfAI && (
-                        <div className="rounded-xl p-2.5 bg-red-950/50 border border-red-800/60 text-xs text-red-200 flex items-center gap-2">
+                        <div className="rounded-xl px-3 py-2 bg-red-950/50 border border-red-800/60 text-xs text-red-200 flex items-center gap-2">
                           <Sparkles className="w-3.5 h-3.5 animate-spin text-red-400" />
                           <span>เพื่อนร่วมฝูงหมาป่ากำลังกระซิบตอบ...</span>
                         </div>
@@ -3903,20 +4098,20 @@ export default function App() {
                           e.preventDefault();
                           handleSendWolfMessage();
                         }}
-                        className="shrink-0 p-2.5 border-t border-red-900/60 bg-[#1B0B12] flex items-center gap-2"
+                        className="shrink-0 p-2 border-t border-red-900/60 bg-[#1B0B12] flex items-center gap-1.5"
                       >
                         <input
                           type="text"
                           value={wolfChatInput}
                           onChange={(e) => setWolfChatInput(e.target.value)}
-                          placeholder="กระซิบวางแผนกับเพื่อนหมาป่า (ชาวบ้านไม่เห็น)..."
+                          placeholder="กระซิบวางแผนกับเพื่อนหมาป่า..."
                           disabled={isGeneratingWolfAI}
-                          className="flex-1 min-w-0 min-h-[44px] bg-slate-950/90 border border-red-900/70 focus:border-red-400 rounded-lg px-3 py-2 text-base md:text-xs text-white placeholder:text-red-300/40 outline-none select-text"
+                          className="flex-1 min-w-0 min-h-[42px] bg-slate-950/90 border border-red-900/70 focus:border-red-400 rounded-xl px-3 py-1.5 text-base md:text-sm text-white placeholder:text-red-300/40 outline-none select-text"
                         />
                         <button
                           type="submit"
                           disabled={!wolfChatInput.trim() || isGeneratingWolfAI}
-                          className="min-h-[44px] px-3.5 py-2 rounded-lg bg-red-600 hover:bg-red-500 disabled:opacity-40 text-white font-bold text-xs flex items-center gap-1 cursor-pointer shrink-0"
+                          className="min-h-[42px] px-3.5 py-1.5 rounded-xl bg-red-600 hover:bg-red-500 disabled:opacity-40 text-white font-bold text-xs flex items-center gap-1 cursor-pointer shrink-0"
                         >
                           <Send className="w-3.5 h-3.5" />
                           <span>กระซิบ</span>
@@ -3925,54 +4120,77 @@ export default function App() {
                     )}
                   </div>
                 ) : (
-                  <div className="flex-1 min-h-0 overflow-y-auto p-3 md:p-4 space-y-2.5 md:space-y-3">
+                  /* Clean LINE/Messenger-Style Public Group Chat Feed */
+                  <div className="flex-1 min-h-0 overflow-y-auto px-2.5 py-2.5 md:px-4 md:py-3 space-y-2.5">
                     {visibleMessages.map((m) => {
                       const isMod = m.senderId === 'moderator';
                       const isSecret = m.senderId === 'secret' || m.isSecret;
                       const isMe = Boolean(myPlayer && m.senderId === myPlayer.id);
 
-                      return (
-                        <div
-                          key={m.id}
-                          className={`rounded-xl p-3.5 text-sm leading-relaxed border ${
-                            isSecret
-                              ? 'bg-amber-950/35 border-amber-500/40 text-amber-100'
-                              : isMod
-                              ? 'bg-slate-900/95 border-slate-700/80 text-slate-100'
-                              : isMe
-                              ? 'bg-sky-950/40 border-sky-500/40 text-sky-100 ml-4'
-                              : 'bg-[#131D33] border-slate-800 text-slate-200'
-                          }`}
-                        >
-                          <div className="flex items-center justify-between gap-2 text-xs text-slate-400 mb-1">
-                            <div className="flex items-center gap-1.5 font-semibold text-slate-200">
+                      if (isMod || isSecret) {
+                        return (
+                          <div
+                            key={m.id}
+                            className={`rounded-xl px-3 py-2 text-[13px] md:text-sm leading-relaxed border ${
+                              isSecret
+                                ? 'bg-amber-950/40 border-amber-500/40 text-amber-100'
+                                : 'bg-slate-900/90 border-slate-700/75 text-slate-100'
+                            }`}
+                          >
+                            <div className="flex items-center justify-between gap-2 text-[11px] mb-1">
                               <span
-                                className={
-                                  isSecret
-                                    ? 'text-amber-300'
-                                    : isMod
-                                    ? 'text-amber-400'
-                                    : isMe
-                                    ? 'text-sky-300'
-                                    : 'text-white'
-                                }
+                                className={`font-bold ${
+                                  isSecret ? 'text-amber-300' : 'text-amber-400'
+                                }`}
                               >
                                 {m.senderName}
                               </span>
-                              {m.tone && (
-                                <>
-                                  <span aria-hidden="true">·</span>
-                                  <span className="text-amber-300/90 font-normal">
-                                    {m.tone}
-                                  </span>
-                                </>
-                              )}
+                              <span className="font-mono tabular-nums text-[10px] text-slate-400 shrink-0">
+                                {m.phaseLabel}
+                              </span>
                             </div>
-                            <span className="font-mono tabular-nums text-[11px] text-slate-500 shrink-0">
-                              {m.phaseLabel}
+                            <div className="whitespace-pre-line select-text">
+                              {m.text}
+                            </div>
+                          </div>
+                        );
+                      }
+
+                      return (
+                        <div
+                          key={m.id}
+                          className={`flex flex-col ${
+                            isMe ? 'items-end' : 'items-start'
+                          }`}
+                        >
+                          <div
+                            className={`flex items-center gap-1.5 px-1 mb-0.5 text-[11px] ${
+                              isMe ? 'flex-row-reverse' : 'flex-row'
+                            }`}
+                          >
+                            <span
+                              className={`font-bold ${
+                                isMe ? 'text-sky-300' : 'text-slate-200'
+                              }`}
+                            >
+                              {m.senderName}
+                            </span>
+                            {m.tone && (
+                              <span className="text-[10px] text-amber-300/85">
+                                · {m.tone}
+                              </span>
+                            )}
+                            <span className="text-[10px] text-slate-500 font-mono tabular-nums">
+                              {m.timestamp}
                             </span>
                           </div>
-                          <div className="whitespace-pre-line text-xs md:text-sm select-text">
+                          <div
+                            className={`max-w-[88%] px-3.5 py-2 text-[13.5px] md:text-sm leading-relaxed whitespace-pre-line select-text border ${
+                              isMe
+                                ? 'bg-sky-600/30 border-sky-400/45 text-sky-50 rounded-2xl rounded-tr-sm'
+                                : 'bg-[#152038] border-slate-700/80 text-slate-100 rounded-2xl rounded-tl-sm'
+                            }`}
+                          >
                             {m.text}
                           </div>
                         </div>
@@ -3980,17 +4198,17 @@ export default function App() {
                     })}
 
                     {isGeneratingAI && (
-                      <div className="rounded-xl p-3 bg-slate-900/80 border border-slate-800 text-xs text-amber-300 flex items-center gap-2">
-                        <Sparkles className="w-4 h-4 animate-spin" />
-                        <span>ผู้เล่นในวงกำลังคิดวิเคราะห์และพิมพ์ตอบ...</span>
+                      <div className="inline-flex items-center gap-2 rounded-2xl rounded-tl-sm px-3.5 py-2 bg-[#152038] border border-slate-700/80 text-xs text-amber-300">
+                        <Sparkles className="w-3.5 h-3.5 animate-spin" />
+                        <span>กำลังพิมพ์ตอบ...</span>
                       </div>
                     )}
                     <div ref={chatEndRef} />
                   </div>
                 )}
 
-                {/* Phase Action Footer */}
-                <div className="shrink-0 max-h-[44dvh] md:max-h-none overflow-y-auto p-2.5 sm:p-3.5 border-t border-slate-800 bg-[#0F172A] space-y-2">
+                {/* Compact Sticky Bottom Action Bar */}
+                <div className="shrink-0 max-h-[38dvh] md:max-h-none overflow-y-auto p-2 md:p-3 border-t border-slate-800 bg-[#0D1526] space-y-1.5 md:space-y-2">
                   {/* PHASE 1: NIGHT ACTION CONTROLS */}
                   {phase === 'NIGHT_ACTION' && (
                     <div className="space-y-2.5">
@@ -4160,7 +4378,7 @@ export default function App() {
                                 'เลือกผู้เล่น 1 คนที่บอดี้การ์ดต้องการคุ้มกันในคืนนี้:'}
                             </span>
                           </div>
-                          <div className="flex flex-wrap gap-1.5">
+                          <div className="flex md:flex-wrap gap-1.5 overflow-x-auto md:overflow-visible no-scrollbar pb-0.5 md:pb-0">
                             {players
                               .filter((p) => isTargetSelectable(p))
                               .map((p) => {
@@ -4174,7 +4392,7 @@ export default function App() {
                                   <button
                                     key={p.id}
                                     onClick={() => handleSelectPlayerOnCanvas(p.id)}
-                                    className={`min-h-[40px] px-3 py-1.5 rounded-lg text-xs font-semibold transition-colors cursor-pointer ${
+                                    className={`shrink-0 min-h-[38px] md:min-h-[40px] px-3 py-1 rounded-lg text-xs font-semibold transition-colors cursor-pointer whitespace-nowrap ${
                                       isChosen && partnerPointing
                                         ? 'bg-emerald-400 text-slate-950 ring-2 ring-emerald-300'
                                         : isChosen
@@ -4184,7 +4402,7 @@ export default function App() {
                                         : 'bg-slate-800 text-slate-200 hover:bg-slate-700'
                                     }`}
                                   >
-                                    {p.name}
+                                    {p.shortName}
                                     {partnerPointing ? ' 🐺' : ''}
                                   </button>
                                 );
@@ -4224,27 +4442,22 @@ export default function App() {
 
                   {/* PHASE 2: DAY DISCUSSION CONTROLS (UNANIMOUS READY TO VOTE) */}
                   {phase === 'DAY_DISCUSSION' && (
-                    <div className="space-y-2">
-                      {/* Live unanimous readiness bar (humans + AI) */}
-                      <div className="rounded-lg bg-slate-900/90 border border-slate-800 px-3 py-2 space-y-1.5">
-                        <div className="flex items-center justify-between text-[11px]">
-                          <span className="text-slate-300 font-semibold">
-                            ความพร้อมเข้าสู่ช่วงโหวต (ต้องครบทุกคนทั้งคนจริงและ AI):
-                          </span>
-                          <span className="font-mono font-bold text-amber-300 tabular-nums">
-                            {readyCountInPhase}/{requiredPhaseReadyPlayers.length} คน
-                          </span>
-                        </div>
-                        <div className="flex flex-wrap gap-1">
+                    <div className="space-y-1.5 md:space-y-2">
+                      {/* Compact Live Unanimous Readiness Bar */}
+                      <div className="flex items-center gap-2 text-[11px] bg-slate-900/80 border border-slate-800/90 rounded-lg px-2.5 py-1.5">
+                        <span className="font-mono font-bold text-amber-300 tabular-nums shrink-0">
+                          พร้อมโหวต {readyCountInPhase}/{requiredPhaseReadyPlayers.length}
+                        </span>
+                        <div className="flex md:flex-wrap items-center gap-1 overflow-x-auto md:overflow-visible no-scrollbar">
                           {requiredPhaseReadyPlayers.map((rp) => {
                             const ready = phaseReadyIds.includes(rp.id);
                             return (
                               <span
                                 key={rp.id}
-                                className={`px-2 py-0.5 rounded text-[10px] font-semibold border transition-colors ${
+                                className={`shrink-0 px-1.5 py-0.5 rounded text-[10px] font-semibold border transition-colors ${
                                   ready
                                     ? 'bg-emerald-950/70 border-emerald-500/50 text-emerald-300'
-                                    : 'bg-slate-800/80 border-slate-700 text-slate-400'
+                                    : 'bg-slate-800/70 border-slate-700/80 text-slate-400'
                                 }`}
                               >
                                 {ready ? '✓ ' : ''}
@@ -4256,8 +4469,8 @@ export default function App() {
                       </div>
 
                       {!myPlayer ? (
-                        <div className="p-2.5 rounded-lg bg-slate-900 border border-slate-700 text-xs text-slate-300 text-center">
-                          โหมดผู้ชม — กำลังรับชมวงสนทนาของสภาหมู่บ้าน (คุณจะได้เข้าร่วมในรอบถัดไป)
+                        <div className="p-2 rounded-lg bg-slate-900 border border-slate-700 text-xs text-slate-300 text-center">
+                          โหมดผู้ชม — กำลังรับชมวงสนทนาของสภาหมู่บ้าน
                         </div>
                       ) : (
                         <>
@@ -4267,31 +4480,31 @@ export default function App() {
                                 e.preventDefault();
                                 handleSendHumanStatement();
                               }}
-                              className="flex items-center gap-2"
+                              className="flex items-center gap-1.5"
                             >
                               <input
                                 type="text"
                                 value={humanInput}
                                 onChange={(e) => setHumanInput(e.target.value)}
-                                placeholder={`พิมพ์พูดคุย ถามจี้ หรือวิเคราะห์ในชื่อ "${myPlayer.name}"...`}
+                                placeholder={`พิมพ์คุยหรือวิเคราะห์ในชื่อ "${myPlayer.shortName}"...`}
                                 disabled={isGeneratingAI}
-                                className="flex-1 min-w-0 min-h-[44px] bg-slate-900 border border-slate-700 focus:border-amber-400 rounded-lg px-3 py-2 text-base md:text-sm text-white placeholder:text-slate-500 outline-none select-text"
+                                className="flex-1 min-w-0 min-h-[42px] bg-slate-900 border border-slate-700 focus:border-amber-400 rounded-xl px-3 py-1.5 text-base md:text-sm text-white placeholder:text-slate-500 outline-none select-text"
                               />
                               <button
                                 type="submit"
                                 disabled={!humanInput.trim() || isGeneratingAI}
-                                className="min-h-[44px] px-3.5 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 disabled:opacity-40 text-amber-300 font-semibold text-xs flex items-center gap-1.5 transition-colors cursor-pointer shrink-0"
+                                className="min-h-[42px] px-3.5 py-1.5 rounded-xl bg-amber-500/15 hover:bg-amber-500/25 border border-amber-500/40 disabled:opacity-40 text-amber-300 font-bold text-xs flex items-center gap-1 transition-colors cursor-pointer shrink-0"
                               >
                                 <Send className="w-3.5 h-3.5" />
-                                <span>ส่งข้อความ</span>
+                                <span>ส่ง</span>
                               </button>
                             </form>
                           )}
 
                           <div
-                            className={`grid gap-2 ${
+                            className={`grid gap-1.5 ${
                               aliveAICount > 0 && myPlayer.alive
-                                ? 'grid-cols-1 sm:grid-cols-2'
+                                ? 'grid-cols-2'
                                 : 'grid-cols-1'
                             }`}
                           >
@@ -4300,10 +4513,10 @@ export default function App() {
                                 type="button"
                                 onClick={handleContinueAIDebate}
                                 disabled={isGeneratingAI}
-                                className="min-h-[44px] py-2 px-3 rounded-lg bg-slate-800 hover:bg-slate-700 disabled:opacity-50 text-slate-200 font-semibold text-xs transition-colors cursor-pointer flex items-center justify-center gap-1.5 border border-slate-700"
+                                className="min-h-[42px] py-1.5 px-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 disabled:opacity-50 text-slate-200 font-semibold text-xs transition-colors cursor-pointer flex items-center justify-center gap-1.5 border border-slate-700"
                               >
-                                <MessageSquare className="w-3.5 h-3.5 text-amber-400" />
-                                <span>ฟังคนในวงวิเคราะห์กันต่อ</span>
+                                <MessageSquare className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+                                <span className="truncate">ฟังคนในวงต่อ</span>
                               </button>
                             )}
 
@@ -4318,7 +4531,7 @@ export default function App() {
                                   )
                                 }
                                 disabled={isGeneratingAI}
-                                className={`min-h-[44px] py-2 px-3 rounded-lg font-bold text-xs transition-colors cursor-pointer flex items-center justify-center gap-1.5 ${
+                                className={`min-h-[42px] py-1.5 px-2.5 rounded-xl font-bold text-xs transition-colors cursor-pointer flex items-center justify-center gap-1.5 ${
                                   isMyPhaseReady
                                     ? 'bg-emerald-600 hover:bg-emerald-500 text-white'
                                     : 'bg-amber-500 hover:bg-amber-400 text-slate-950'
@@ -4326,25 +4539,23 @@ export default function App() {
                               >
                                 {isMyPhaseReady ? (
                                   <>
-                                    <Check className="w-4 h-4 stroke-[2.5]" />
-                                    <span>
-                                      พร้อมโหวตแล้ว ({readyCountInPhase}/
-                                      {requiredPhaseReadyPlayers.length}) · คลิกเพื่อยกเลิก
+                                    <Check className="w-3.5 h-3.5 stroke-[2.5] shrink-0" />
+                                    <span className="truncate">
+                                      พร้อมแล้ว ({readyCountInPhase}/{requiredPhaseReadyPlayers.length})
                                     </span>
                                   </>
                                 ) : (
                                   <>
-                                    <UserCheck className="w-4 h-4" />
-                                    <span>
-                                      กดพร้อมเข้าสู่ช่วงโหวต ({readyCountInPhase}/
-                                      {requiredPhaseReadyPlayers.length})
+                                    <UserCheck className="w-3.5 h-3.5 shrink-0" />
+                                    <span className="truncate">
+                                      พร้อมโหวต ({readyCountInPhase}/{requiredPhaseReadyPlayers.length})
                                     </span>
                                   </>
                                 )}
                               </button>
                             ) : (
                               <div className="py-2 px-3 rounded-lg bg-slate-900 border border-slate-800 text-xs text-slate-400 text-center">
-                                คุณเสียชีวิตแล้ว · รอผู้รอดชีวิตกดพร้อมเข้าสู่ช่วงโหวตให้ครบทุกคน
+                                คุณเสียชีวิตแล้ว · รอผู้รอดชีวิตกดพร้อมเข้าสู่ช่วงโหวต
                               </div>
                             )}
                           </div>
@@ -4383,17 +4594,17 @@ export default function App() {
                         </div>
                       ) : myPlayer.alive && myPlayer.canVote ? (
                         <>
-                          <p className="text-xs text-amber-300 font-semibold">
-                            เลือกผู้เล่น 1 คนที่ {myPlayer.name} ต้องการโหวตประหาร หรือเลือก &quot;งดออกเสียง (ไม่โหวต)&quot; เพื่อเก็บไว้ตัดสินใจวันหลัง:
+                          <p className="text-[11px] md:text-xs text-amber-300 font-semibold">
+                            เลือกโหวตประหาร 1 คน หรือเลือก &quot;งดออกเสียง&quot;:
                           </p>
-                          <div className="flex flex-wrap gap-1.5">
+                          <div className="flex md:flex-wrap gap-1.5 overflow-x-auto md:overflow-visible no-scrollbar pb-0.5 md:pb-0">
                             {players
                               .filter((p) => p.alive && p.id !== myPlayer.id)
                               .map((p) => (
                                 <button
                                   key={p.id}
                                   onClick={() => setSelectedTargetId(p.id)}
-                                  className={`min-h-[40px] px-3 py-1.5 rounded-lg text-xs font-semibold transition-colors cursor-pointer ${
+                                  className={`shrink-0 min-h-[38px] md:min-h-[40px] px-3 py-1 rounded-lg text-xs font-semibold transition-colors cursor-pointer whitespace-nowrap ${
                                     selectedTargetId === p.id
                                       ? 'bg-red-500 text-white'
                                       : 'bg-slate-800 text-slate-200 hover:bg-slate-700'
@@ -4405,39 +4616,39 @@ export default function App() {
                             <button
                               type="button"
                               onClick={() => setSelectedTargetId(ABSTAIN_VOTE_ID)}
-                              className={`min-h-[40px] px-3 py-1.5 rounded-lg text-xs font-bold transition-colors cursor-pointer flex items-center gap-1 border ${
+                              className={`shrink-0 min-h-[38px] md:min-h-[40px] px-3 py-1 rounded-lg text-xs font-bold transition-colors cursor-pointer flex items-center gap-1 border whitespace-nowrap ${
                                 selectedTargetId === ABSTAIN_VOTE_ID
                                   ? 'bg-amber-400 text-slate-950 border-amber-300'
                                   : 'bg-slate-900 text-amber-200 border-amber-500/40 hover:bg-slate-800'
                               }`}
                             >
                               <Ban className="w-3.5 h-3.5" />
-                              <span>งดออกเสียง (ไม่โหวตวันนี้)</span>
+                              <span>งดออกเสียง</span>
                             </button>
                           </div>
                           <button
                             onClick={handleConfirmVote}
                             disabled={!selectedTargetId || isGeneratingAI}
-                            className={`w-full min-h-[44px] py-2.5 px-4 rounded-lg disabled:bg-slate-800 disabled:text-slate-500 font-bold text-sm transition-colors cursor-pointer ${
+                            className={`w-full min-h-[44px] py-2 px-4 rounded-xl disabled:bg-slate-800 disabled:text-slate-500 font-bold text-sm transition-colors cursor-pointer ${
                               selectedTargetId === ABSTAIN_VOTE_ID
                                 ? 'bg-amber-500 hover:bg-amber-400 text-slate-950'
                                 : 'bg-red-600 hover:bg-red-500 text-white'
                             }`}
                           >
                             {selectedTargetId === ABSTAIN_VOTE_ID
-                              ? 'ยืนยัน: งดออกเสียง (ไม่โหวตประหารใครในวันนี้)'
+                              ? 'ยืนยัน: งดออกเสียง (ไม่โหวตวันนี้)'
                               : selectedTargetId
                               ? `ยืนยันโหวตประหาร "${
-                                  players.find((p) => p.id === selectedTargetId)?.name
+                                  players.find((p) => p.id === selectedTargetId)?.shortName
                                 }"`
-                              : 'โปรดเลือกผู้เล่นที่ต้องการโหวต หรือเลือก "งดออกเสียง"'}
+                              : 'โปรดเลือกผู้เล่นหรือ "งดออกเสียง"'}
                           </button>
                         </>
                       ) : (
                         <button
                           onClick={handleConfirmVote}
                           disabled={isGeneratingAI}
-                          className="w-full min-h-[44px] py-2.5 px-4 rounded-lg bg-red-600 hover:bg-red-500 text-white font-bold text-sm transition-colors cursor-pointer"
+                          className="w-full min-h-[44px] py-2.5 px-4 rounded-xl bg-red-600 hover:bg-red-500 text-white font-bold text-sm transition-colors cursor-pointer"
                         >
                           {!myPlayer.alive
                             ? 'ดูผลการโหวตของผู้เล่นที่เหลืออยู่'
@@ -4449,37 +4660,29 @@ export default function App() {
 
                   {/* PHASE 3B: DAY RESULT — CASE 1: 5-MIN TIMER + CHAT OR CASE 2: UNANIMOUS READY TO ENTER NEXT NIGHT */}
                   {phase === 'DAY_RESULT' && (
-                    <div className="space-y-2">
-                      <div className="rounded-lg bg-slate-900/90 border border-amber-500/30 px-3 py-2 space-y-2">
-                        <div className="flex flex-wrap items-center justify-between gap-2 text-xs">
-                          <span className="text-amber-300 font-bold flex items-center gap-1.5">
-                            <Moon className="w-3.5 h-3.5" />
-                            <span>
-                              พร้อมเข้าสู่คืนที่ {dayCount + 1} (ครบทุกคนข้ามทันที / คุยต่อได้สูงสุด 5 นาที)
-                            </span>
+                    <div className="space-y-1.5 md:space-y-2">
+                      <div className="flex items-center gap-2 bg-slate-900/80 border border-amber-500/30 rounded-lg px-2.5 py-1.5 text-[11px]">
+                        <div className="flex items-center gap-1.5 font-mono font-bold tabular-nums shrink-0">
+                          <span className="text-emerald-300">
+                            พร้อม {readyCountInPhase}/{requiredPhaseReadyPlayers.length}
                           </span>
-                          <div className="flex items-center gap-2 font-mono font-bold tabular-nums">
-                            {dayResultSecondsLeft !== null && (
-                              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-amber-500/20 border border-amber-400/50 text-amber-200">
-                                <Clock className="w-3 h-3" />
-                                <span>{formatCountdown(dayResultSecondsLeft)}</span>
-                              </span>
-                            )}
-                            <span className="text-emerald-300">
-                              {readyCountInPhase}/{requiredPhaseReadyPlayers.length} คน
+                          {dayResultSecondsLeft !== null && (
+                            <span className="inline-flex items-center gap-1 text-amber-200">
+                              <Clock className="w-3 h-3" />
+                              <span>{formatCountdown(dayResultSecondsLeft)}</span>
                             </span>
-                          </div>
+                          )}
                         </div>
-                        <div className="flex flex-wrap gap-1">
+                        <div className="flex md:flex-wrap items-center gap-1 overflow-x-auto md:overflow-visible no-scrollbar">
                           {requiredPhaseReadyPlayers.map((rp) => {
                             const ready = phaseReadyIds.includes(rp.id);
                             return (
                               <span
                                 key={rp.id}
-                                className={`px-2 py-0.5 rounded text-[10px] font-semibold border transition-colors ${
+                                className={`shrink-0 px-1.5 py-0.5 rounded text-[10px] font-semibold border transition-colors ${
                                   ready
                                     ? 'bg-emerald-950/70 border-emerald-500/50 text-emerald-300'
-                                    : 'bg-slate-800/80 border-slate-700 text-slate-400'
+                                    : 'bg-slate-800/70 border-slate-700/80 text-slate-400'
                                 }`}
                               >
                                 {ready ? '✓ ' : ''}
@@ -4496,20 +4699,20 @@ export default function App() {
                             e.preventDefault();
                             handleSendHumanStatement();
                           }}
-                          className="flex items-center gap-2"
+                          className="flex items-center gap-1.5"
                         >
                           <input
                             type="text"
                             value={humanInput}
                             onChange={(e) => setHumanInput(e.target.value)}
-                            placeholder={`คุยวิเคราะห์ต่อก่อนหมดเวลา 5 นาที ในชื่อ "${myPlayer.name}"...`}
+                            placeholder={`คุยต่อก่อนเข้าคืนที่ ${dayCount + 1}...`}
                             disabled={isGeneratingAI}
-                            className="flex-1 min-w-0 min-h-[44px] bg-slate-900 border border-slate-700 focus:border-amber-400 rounded-lg px-3 py-2 text-base md:text-sm text-white placeholder:text-slate-500 outline-none select-text"
+                            className="flex-1 min-w-0 min-h-[42px] bg-slate-900 border border-slate-700 focus:border-amber-400 rounded-xl px-3 py-1.5 text-base md:text-sm text-white placeholder:text-slate-500 outline-none select-text"
                           />
                           <button
                             type="submit"
                             disabled={!humanInput.trim() || isGeneratingAI}
-                            className="min-h-[44px] px-3.5 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 disabled:opacity-40 text-amber-300 font-semibold text-xs flex items-center gap-1.5 transition-colors cursor-pointer shrink-0"
+                            className="min-h-[42px] px-3.5 py-1.5 rounded-xl bg-amber-500/15 hover:bg-amber-500/25 border border-amber-500/40 disabled:opacity-40 text-amber-300 font-bold text-xs flex items-center gap-1 transition-colors cursor-pointer shrink-0"
                           >
                             <Send className="w-3.5 h-3.5" />
                             <span>ส่ง</span>
@@ -4518,8 +4721,8 @@ export default function App() {
                       )}
 
                       {!myPlayer ? (
-                        <div className="p-2.5 rounded-lg bg-slate-900 border border-slate-700 text-xs text-slate-300 text-center">
-                          โหมดผู้ชม — รอผู้รอดชีวิตกดพร้อมเข้าสู่คืนที่ {dayCount + 1} ครบทุกคน หรือหมดเวลา 5 นาที
+                        <div className="p-2 rounded-lg bg-slate-900 border border-slate-700 text-xs text-slate-300 text-center">
+                          โหมดผู้ชม — รอเข้าสู่คืนที่ {dayCount + 1}
                         </div>
                       ) : myPlayer.alive ? (
                         <button
@@ -4531,7 +4734,7 @@ export default function App() {
                               'NIGHT_ACTION'
                             )
                           }
-                          className={`w-full min-h-[44px] py-2.5 px-4 rounded-lg font-bold text-sm transition-colors cursor-pointer flex items-center justify-center gap-2 ${
+                          className={`w-full min-h-[42px] py-2 px-4 rounded-xl font-bold text-xs md:text-sm transition-colors cursor-pointer flex items-center justify-center gap-1.5 ${
                             isMyPhaseReady
                               ? 'bg-emerald-600 hover:bg-emerald-500 text-white'
                               : 'bg-amber-500 hover:bg-amber-400 text-slate-950'
@@ -4541,14 +4744,14 @@ export default function App() {
                             <>
                               <Check className="w-4 h-4 stroke-[2.5]" />
                               <span>
-                                คุณกดพร้อมเข้าสู่คืนที่ {dayCount + 1} แล้ว · รอครบ ({readyCountInPhase}/{requiredPhaseReadyPlayers.length})
+                                พร้อมเข้าคืนที่ {dayCount + 1} แล้ว ({readyCountInPhase}/{requiredPhaseReadyPlayers.length})
                               </span>
                             </>
                           ) : (
                             <>
                               <Moon className="w-4 h-4" />
                               <span>
-                                ยืนยันพร้อมเข้าสู่คืนที่ {dayCount + 1} ทันที ({readyCountInPhase}/{requiredPhaseReadyPlayers.length} คน)
+                                พร้อมเข้าสู่คืนที่ {dayCount + 1} ({readyCountInPhase}/{requiredPhaseReadyPlayers.length})
                               </span>
                             </>
                           )}
@@ -5024,82 +5227,6 @@ export default function App() {
           onClose={() => setBodyguardOverlay(null)}
         />
       )}
-
-      {/* 9. TEMPORARY CORNER ANIMATION PREVIEW BUTTONS */}
-      <div className="fixed bottom-1.5 left-2 right-2 md:right-auto z-[60] flex items-center gap-1.5 overflow-x-auto no-scrollbar md:flex-wrap pointer-events-auto">
-        <button
-          type="button"
-          onClick={() => {
-            setBodyguardOverlay(null);
-            setDeathOverlay('WOLF_KILL');
-          }}
-          className="shrink-0 px-2.5 py-1.5 rounded-lg bg-red-950/90 hover:bg-red-800/95 text-red-200 border border-red-500/50 text-[11px] font-semibold shadow-lg backdrop-blur-sm transition-colors cursor-pointer flex items-center gap-1"
-          title="ทดสอบแอนิเมชันโดนหมาป่าฆ่าตอนกลางคืน"
-        >
-          <Skull className="w-3 h-3 text-red-400" />
-          <span>Test Wolf Kill</span>
-        </button>
-        <button
-          type="button"
-          onClick={() => {
-            setBodyguardOverlay(null);
-            setDeathOverlay('DAY_EXECUTION');
-          }}
-          className="shrink-0 px-2.5 py-1.5 rounded-lg bg-orange-950/90 hover:bg-orange-800/95 text-amber-200 border border-amber-500/50 text-[11px] font-semibold shadow-lg backdrop-blur-sm transition-colors cursor-pointer flex items-center gap-1"
-          title="ทดสอบแอนิเมชันโดนชาวบ้านโหวตประหารตอนกลางวัน"
-        >
-          <Flame className="w-3 h-3 text-amber-400" />
-          <span>Test Execution</span>
-        </button>
-        <button
-          type="button"
-          onClick={() => {
-            setDeathOverlay(null);
-            setBodyguardOverlay('WOLF_BLOCKED');
-          }}
-          className="shrink-0 px-2.5 py-1.5 rounded-lg bg-sky-950/90 hover:bg-sky-800/95 text-sky-200 border border-sky-400/50 text-[11px] font-semibold shadow-lg backdrop-blur-sm transition-colors cursor-pointer flex items-center gap-1"
-          title="ทดสอบมุมมองหมาป่าเมื่อโดนบอดี้การ์ดบล็อก"
-        >
-          <Shield className="w-3 h-3 text-sky-300" />
-          <span>Test: Wolf Blocked</span>
-        </button>
-        <button
-          type="button"
-          onClick={() => {
-            setDeathOverlay(null);
-            setBodyguardOverlay('VICTIM_SAVED');
-          }}
-          className="shrink-0 px-2.5 py-1.5 rounded-lg bg-amber-950/90 hover:bg-amber-800/95 text-amber-200 border border-amber-400/50 text-[11px] font-semibold shadow-lg backdrop-blur-sm transition-colors cursor-pointer flex items-center gap-1"
-          title="ทดสอบมุมมองเหยื่อที่รอดชีวิตเพราะบอดี้การ์ดช่วยไว้"
-        >
-          <Shield className="w-3 h-3 text-amber-300" />
-          <span>Test: Victim Saved</span>
-        </button>
-        <button
-          type="button"
-          onClick={() => {
-            setDeathOverlay(null);
-            setBodyguardOverlay('BG_SUCCESS');
-          }}
-          className="shrink-0 px-2.5 py-1.5 rounded-lg bg-emerald-950/90 hover:bg-emerald-800/95 text-emerald-200 border border-emerald-400/50 text-[11px] font-semibold shadow-lg backdrop-blur-sm transition-colors cursor-pointer flex items-center gap-1"
-          title="ทดสอบมุมมองบอดี้การ์ดเมื่อปกป้องเป้าหมายสำเร็จ"
-        >
-          <Shield className="w-3 h-3 text-emerald-300" />
-          <span>Test: BG Success</span>
-        </button>
-        <button
-          type="button"
-          onClick={() => {
-            setDeathOverlay(null);
-            setBodyguardOverlay('BG_FAILED');
-          }}
-          className="shrink-0 px-2.5 py-1.5 rounded-lg bg-slate-900/95 hover:bg-slate-800 text-slate-300 border border-slate-500/50 text-[11px] font-semibold shadow-lg backdrop-blur-sm transition-colors cursor-pointer flex items-center gap-1"
-          title="ทดสอบมุมมองบอดี้การ์ดเมื่อปกป้องผิดคน"
-        >
-          <Shield className="w-3 h-3 text-slate-400" />
-          <span>Test: BG Failed</span>
-        </button>
-      </div>
     </div>
   );
 }
