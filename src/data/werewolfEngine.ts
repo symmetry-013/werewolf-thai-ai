@@ -1,5 +1,6 @@
 import werewolfCardImg from '../assets/images/role_card_werewolf_1793769760093.jpg';
 import wolfCubCardImg from '../assets/images/role_card_wolf_cub_1793783231025.jpg';
+import humanWolfCardImg from '../assets/images/role_card_human_wolf_1795231094178.jpg';
 import seerCardImg from '../assets/images/role_card_seer_1793769760933.jpg';
 import bodyguardCardImg from '../assets/images/role_card_bodyguard_1793769761764.jpg';
 import beggarCardImg from '../assets/images/role_card_beggar_1793783231788.jpg';
@@ -9,6 +10,7 @@ import villageBackdropImg from '../assets/images/werewolf_village_backdrop_17937
 export type RoleType =
   | 'WEREWOLF'
   | 'WOLF_CUB'
+  | 'HUMAN_WOLF'
   | 'SEER'
   | 'BODYGUARD'
   | 'BEGGAR'
@@ -35,7 +37,17 @@ export interface RoleMetadata {
   accentColor: string;
 }
 
+export const WOLF_ROLE_CANDIDATES: RoleType[] = [
+  'WEREWOLF',
+  'WOLF_CUB',
+  'HUMAN_WOLF',
+];
+
 export const isWerewolfTeam = (role: RoleType): boolean =>
+  role === 'WEREWOLF' || role === 'WOLF_CUB' || role === 'HUMAN_WOLF';
+
+// Seer inspection rule: HUMAN_WOLF (หมาป่ามนุษย์) disguises as a Villager and scans as non-werewolf!
+export const appearsAsWerewolfToSeer = (role: RoleType): boolean =>
   role === 'WEREWOLF' || role === 'WOLF_CUB';
 
 export const ROLE_INFO: Record<RoleType, RoleMetadata> = {
@@ -47,7 +59,7 @@ export const ROLE_INFO: Record<RoleType, RoleMetadata> = {
     teamThai: 'ฝ่ายมนุษย์หมาป่า',
     image: werewolfCardImg,
     summary:
-      'จ่าฝูงหมาป่า ออกล่าเหยื่อในยามวิกาลร่วมกับลูกหมาป่า หากลูกหมาป่าถูกประหารหรือตาย คืนถัดไปพ่อหมาป่าจะสามารถสังหารเหยื่อได้ถึง 2 คน!',
+      'จ่าฝูงหมาป่า ออกล่าเหยื่อในยามวิกาลร่วมกับเพื่อนร่วมฝูง หากลูกหมาป่าอยู่ในเกมและเสียชีวิต คืนถัดไปหมาป่าที่เหลือจะสามารถสังหารเหยื่อได้ถึง 2 คน!',
     nightPrompt:
       'ดวงจันทร์สีเลือดส่องสว่าง... พ่อหมาป่าโปรดเลือกเหยื่อที่ต้องการขย้ำในคืนนี้',
     accentColor: '#DC2626',
@@ -60,10 +72,23 @@ export const ROLE_INFO: Record<RoleType, RoleMetadata> = {
     teamThai: 'ฝ่ายมนุษย์หมาป่า',
     image: wolfCubCardImg,
     summary:
-      'ออกล่ายามวิกาลพร้อมพ่อหมาป่า หากคุณถูกโหวตประหารหรือตาย คืนถัดไปพ่อหมาป่าที่เหลืออยู่จะได้สิทธิ์สังหารเหยื่อถึง 2 คน!',
+      'ออกล่ายามวิกาลพร้อมเพื่อนร่วมฝูงหมาป่า หากคุณถูกโหวตประหารหรือตาย คืนถัดไปหมาป่าที่เหลืออยู่จะได้สิทธิ์สังหารเหยื่อถึง 2 คน!',
     nightPrompt:
-      'คุณตื่นขึ้นมาพร้อมพ่อหมาป่า... โปรดเลือกเหยื่อที่ฝูงของคุณต้องการขย้ำในคืนนี้',
+      'คุณตื่นขึ้นมาพร้อมเพื่อนร่วมฝูง... โปรดเลือกเหยื่อที่ฝูงของคุณต้องการขย้ำในคืนนี้',
     accentColor: '#F97316',
+  },
+  HUMAN_WOLF: {
+    id: 'HUMAN_WOLF',
+    thaiName: 'หมาป่ามนุษย์',
+    englishName: 'Human Werewolf',
+    team: 'WEREWOLF',
+    teamThai: 'ฝ่ายมนุษย์หมาป่า',
+    image: humanWolfCardImg,
+    summary:
+      'หมาป่าในคราบมนุษย์ที่แฝงตัวแนบเนียนที่สุด! ออกล่าเหยื่อร่วมกับฝูงหมาป่าในยามวิกาล แต่มีความสามารถพิเศษคือ "หมอดู (เทพพยากรณ์) ส่องดูแล้วจะเห็นเป็นฝ่ายชาวบ้าน" ไม่สามารถสแกนจับได้!',
+    nightPrompt:
+      'กลิ่นอายมนุษย์ช่วยอำพรางตัวตนของคุณจากหมอดู... หมาป่ามนุษย์โปรดเลือกเหยื่อที่ฝูงของคุณต้องการขย้ำในคืนนี้',
+    accentColor: '#F43F5E',
   },
   SEER: {
     id: 'SEER',
@@ -73,7 +98,7 @@ export const ROLE_INFO: Record<RoleType, RoleMetadata> = {
     teamThai: 'ฝ่ายชาวบ้าน',
     image: seerCardImg,
     summary:
-      'ใช้ลูกแก้วพยากรณ์ตรวจสอบตัวตนของผู้เล่นได้คืนละ 1 คน ว่าอยู่ฝ่ายมนุษย์หมาป่า (พ่อหมาป่า/ลูกหมาป่า) หรือฝ่ายชาวบ้าน',
+      'ใช้ลูกแก้วพยากรณ์ตรวจสอบตัวตนของผู้เล่นได้คืนละ 1 คน ว่าอยู่ฝ่ายมนุษย์หมาป่าหรือฝ่ายชาวบ้าน (ระวัง! "หมาป่ามนุษย์" จะสแกนเห็นเป็นชาวบ้าน)',
     nightPrompt:
       'ลูกแก้วพยากรณ์เรืองแสงขึ้นในความมืด... โปรดเลือกผู้เล่น 1 คนที่คุณต้องการส่องดูตัวตนที่แท้จริง',
     accentColor: '#F59E0B',
@@ -265,9 +290,21 @@ const HUMAN_COLORS = [
   '#F87171',
 ];
 
+export function pickRandomTwoWolfRoles(): [RoleType, RoleType] {
+  const candidates: RoleType[] = [...WOLF_ROLE_CANDIDATES];
+  for (let i = candidates.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [candidates[i], candidates[j]] = [candidates[j], candidates[i]];
+  }
+  return [candidates[0], candidates[1]];
+}
+
 export function buildRolePoolForCount(totalPlayers: number): RoleType[] {
   const clamped = Math.max(6, Math.min(10, totalPlayers));
-  const pool: RoleType[] = ['WEREWOLF', 'WOLF_CUB', 'SEER', 'BODYGUARD'];
+  // Always 2 werewolves per match, randomly drawn from the 3 wolf roles:
+  // 1. WEREWOLF (พ่อหมาป่า), 2. WOLF_CUB (ลูกหมาป่า), 3. HUMAN_WOLF (หมาป่ามนุษย์)
+  const [wolf1, wolf2] = pickRandomTwoWolfRoles();
+  const pool: RoleType[] = [wolf1, wolf2, 'SEER', 'BODYGUARD'];
   if (clamped >= 7) {
     pool.push('BEGGAR');
   }
@@ -543,7 +580,8 @@ export function resolveNightPhase(params: {
     if (inspectId) {
       const inspectedPlayer = alive.find((p) => p.id === inspectId);
       if (inspectedPlayer) {
-        const isWolf = isWerewolfTeam(inspectedPlayer.role);
+        // HUMAN_WOLF (หมาป่ามนุษย์) scans as a Villager (false) to the Seer!
+        const isWolf = appearsAsWerewolfToSeer(inspectedPlayer.role);
         newSeerRecord = {
           night: nightNumber,
           targetId: inspectedPlayer.id,
@@ -1143,15 +1181,14 @@ export function generateLocalPostGameDebrief(params: {
   const aiPlayers = players.filter((p) => !p.isHuman);
   if (aiPlayers.length === 0) return [];
 
-  const fatherWolf = players.find((p) => p.role === 'WEREWOLF');
-  const wolfCub = players.find((p) => p.role === 'WOLF_CUB');
+  const allWolves = players.filter((p) => isWerewolfTeam(p.role));
   const seer = players.find((p) => p.role === 'SEER');
   const bodyguard = players.find((p) => p.role === 'BODYGUARD');
   const humanPlayers = players.filter((p) => p.isHuman);
   const leadHuman = humanPlayers[0];
 
-  const wolfNames = [fatherWolf?.shortName, wolfCub?.shortName]
-    .filter(Boolean)
+  const wolfNames = allWolves
+    .map((w) => `${w.shortName} (${ROLE_INFO[w.role].thaiName})`)
     .join(' กับ ');
 
   return aiPlayers.map((ai) => {

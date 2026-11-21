@@ -503,8 +503,7 @@ export const VillageCanvas: React.FC<VillageCanvasProps> = ({
             label = 'ยาจก (งดโหวต)';
             color = '#EAB308';
           } else if (isFellowWolf) {
-            label =
-              player.role === 'WOLF_CUB' ? 'ลูกหมาป่า (พวกเรา)' : 'หมาป่า (พวกเรา)';
+            label = `${ROLE_INFO[player.role].thaiName} (พวกเรา)`;
             color = '#EF4444';
           } else if (seerStatus !== undefined) {
             label = seerStatus ? 'ส่องพบ: หมาป่า!' : 'ส่องพบ: ชาวบ้าน';
