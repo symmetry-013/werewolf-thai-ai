@@ -49,7 +49,7 @@ function getGeminiConfig() {
   if (!isValidKey(apiKey)) return null;
   return {
     apiKey: apiKey.trim(),
-    primaryModel: (process.env.GEMINI_MODEL_PRIMARY || "gemini-3.8-flash").trim(),
+    primaryModel: (process.env.GEMINI_MODEL_PRIMARY || "gemini-3.5-flash-lite").trim(),
     fastModel: (process.env.GEMINI_MODEL_FAST || "gemini-3.5-flash-lite").trim(),
   };
 }
@@ -134,12 +134,15 @@ function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise
   });
 }
 
+const geminiModelCooldownUntil = new Map<string, number>();
+
 async function callGeminiProvider(params: {
   tier: "primary" | "fast";
   systemInstruction: string;
   userPrompt: string;
   responseSchema: any;
   maxOutputTokens?: number;
+  hasBackupProviders?: boolean;
 }): Promise<{ data: any; modelUsed: string }> {
   const cfg = getGeminiConfig();
   if (!cfg) throw new Error("Gemini not configured");
@@ -153,7 +156,7 @@ async function callGeminiProvider(params: {
     },
   });
 
-  // Prioritize configured fast/primary models with automatic fallback to flash-lite / flash
+  // Prioritize fast, high-quota lite models first; automatic fallback if rate-limited or timed out
   const preferPrimary =
     process.env.AI_PREFER_PRIMARY === "true" && params.tier === "primary";
   const modelsToTry = preferPrimary
@@ -161,8 +164,22 @@ async function callGeminiProvider(params: {
     : [cfg.fastModel, cfg.primaryModel, "gemini-2.5-flash-lite", "gemini-2.5-flash"];
   const uniqueModels = Array.from(new Set(modelsToTry.filter(Boolean)));
 
+  const now = Date.now();
+  const readyModels = uniqueModels.filter(
+    (m) => (geminiModelCooldownUntil.get(m) || 0) <= now
+  );
+  const candidateModels = readyModels.length > 0 ? readyModels : uniqueModels;
+
   let lastErr: any = null;
-  for (const modelName of uniqueModels) {
+  for (let idx = 0; idx < candidateModels.length; idx++) {
+    const modelName = candidateModels[idx];
+    const hasMoreFallbacks =
+      idx < candidateModels.length - 1 || Boolean(params.hasBackupProviders);
+    // Use snappier per-attempt timeout when fallbacks/Groq exist so gameplay never stalls
+    const attemptTimeoutMs = hasMoreFallbacks
+      ? Math.min(AI_TIMEOUT_MS, 12000)
+      : AI_TIMEOUT_MS;
+
     try {
       const lower = modelName.toLowerCase();
       const isFlash25 = lower.includes("2.5-flash") && !lower.includes("lite");
@@ -188,7 +205,7 @@ async function callGeminiProvider(params: {
           contents: params.userPrompt,
           config,
         }),
-        AI_TIMEOUT_MS,
+        attemptTimeoutMs,
         `gemini:${modelName}`
       );
       const textOut =
@@ -202,9 +219,25 @@ async function callGeminiProvider(params: {
         throw new Error(`Empty AI response from ${modelName} (finishReason=${finishReason})`);
       }
       const parsed = extractJsonFromText(textOut);
+      geminiModelCooldownUntil.delete(modelName);
       return { data: parsed, modelUsed: `gemini:${modelName}` };
-    } catch (err) {
+    } catch (err: any) {
       lastErr = err;
+      const errMsg = String(err?.message || err);
+      const lowerErr = errMsg.toLowerCase();
+      if (lowerErr.includes("404") || lowerErr.includes("not found")) {
+        // Invalid or unavailable model name — skip for 10 minutes
+        geminiModelCooldownUntil.set(modelName, Date.now() + 10 * 60 * 1000);
+      } else if (
+        lowerErr.includes("429") ||
+        lowerErr.includes("quota") ||
+        lowerErr.includes("resource_exhausted") ||
+        lowerErr.includes("timed out")
+      ) {
+        // Rate-limited or congested — cool down for 60s so next turns stay snappy
+        geminiModelCooldownUntil.set(modelName, Date.now() + 60 * 1000);
+      }
+      console.warn(`[Gemini] ${modelName} failed: ${errMsg.slice(0, 180)}`);
     }
   }
   throw lastErr || new Error("Gemini request failed");
@@ -353,10 +386,12 @@ async function generateStructuredAIJson(params: {
     ];
   }
 
-  for (const provider of orderedProviders) {
+  for (let i = 0; i < orderedProviders.length; i++) {
+    const provider = orderedProviders[i];
+    const hasBackupProviders = i < orderedProviders.length - 1;
     try {
       if (provider === "gemini") {
-        return await callGeminiProvider(params);
+        return await callGeminiProvider({ ...params, hasBackupProviders });
       } else if (provider === "anthropic") {
         return await callAnthropicProvider(params);
       } else {

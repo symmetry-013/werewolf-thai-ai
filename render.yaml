@@ -4,7 +4,7 @@ services:
     runtime: node
     plan: free
     buildCommand: npm install --include=dev && npm run build
-    startCommand: npx tsx server.ts
+    startCommand: npm start
     healthCheckPath: /health
     envVars:
       - key: NODE_ENV
@@ -12,7 +12,7 @@ services:
       - key: GEMINI_API_KEY
         sync: false
       - key: GEMINI_MODEL_PRIMARY
-        value: gemini-3.8-flash
+        value: gemini-3.5-flash-lite
       - key: GEMINI_MODEL_FAST
         value: gemini-3.5-flash-lite
       - key: AI_TIMEOUT_MS
