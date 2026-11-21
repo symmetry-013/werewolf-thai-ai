@@ -1,11 +1,56 @@
-import werewolfCardImg from '../assets/images/role_card_werewolf_1793769760093.jpg';
-import wolfCubCardImg from '../assets/images/role_card_wolf_cub_1793783231025.jpg';
-import humanWolfCardImg from '../assets/images/role_card_human_wolf_1795231094178.jpg';
-import seerCardImg from '../assets/images/role_card_seer_1793769760933.jpg';
-import bodyguardCardImg from '../assets/images/role_card_bodyguard_1793769761764.jpg';
-import beggarCardImg from '../assets/images/role_card_beggar_1793783231788.jpg';
-import villagerCardImg from '../assets/images/role_card_villager_1793769761504.jpg';
-import villageBackdropImg from '../assets/images/werewolf_village_backdrop_1793769757998.jpg';
+// Resilient image loader: automatically bundles generated .jpg artwork when present,
+// and gracefully falls back without failing Vite production builds if a binary asset wasn't committed.
+const assetImageModules = import.meta.glob(
+  '../assets/images/*.{jpg,jpeg,png,webp}',
+  { eager: true, import: 'default' }
+) as Record<string, string>;
+
+const resolveCardImage = (filename: string, fallback: string): string =>
+  assetImageModules[`../assets/images/${filename}`] || fallback;
+
+const HUMAN_WOLF_SVG_FALLBACK = `data:image/svg+xml;utf8,${encodeURIComponent(
+  `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 600 800">
+    <defs>
+      <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+        <stop offset="0%" stop-color="#1E0B18"/>
+        <stop offset="55%" stop-color="#0D1324"/>
+        <stop offset="100%" stop-color="#070910"/>
+      </linearGradient>
+      <radialGradient id="moon" cx="50%" cy="22%" r="36%">
+        <stop offset="0%" stop-color="#F43F5E" stop-opacity="0.72"/>
+        <stop offset="60%" stop-color="#991B1B" stop-opacity="0.24"/>
+        <stop offset="100%" stop-color="#0D1324" stop-opacity="0"/>
+      </radialGradient>
+      <radialGradient id="lantern" cx="24%" cy="52%" r="32%">
+        <stop offset="0%" stop-color="#F59E0B" stop-opacity="0.55"/>
+        <stop offset="100%" stop-color="#F59E0B" stop-opacity="0"/>
+      </radialGradient>
+    </defs>
+    <rect width="600" height="800" fill="url(#bg)"/>
+    <rect width="600" height="800" fill="url(#moon)"/>
+    <rect width="600" height="800" fill="url(#lantern)"/>
+    <circle cx="300" cy="165" r="78" fill="#E11D48" opacity="0.28"/>
+    <circle cx="300" cy="165" r="56" fill="#FB7185" opacity="0.5"/>
+    <path d="M360 440 L430 330 L455 375 L515 355 L485 450 L525 560 L380 620 Z" fill="#4C0519" opacity="0.75"/>
+    <path d="M165 760 L205 450 Q230 335 300 315 Q370 335 395 450 L435 760 Z" fill="#171E31" stroke="#334155" stroke-width="4"/>
+    <path d="M225 385 Q240 245 300 228 Q360 245 375 385 Q340 420 300 425 Q260 420 225 385 Z" fill="#0F172A" stroke="#F43F5E" stroke-opacity="0.45" stroke-width="3"/>
+    <ellipse cx="300" cy="340" rx="46" ry="56" fill="#1E293B"/>
+    <path d="M300 284 A46 56 0 0 1 300 396 Z" fill="#111827"/>
+    <ellipse cx="282" cy="336" rx="7" ry="4" fill="#FDE68A"/>
+    <ellipse cx="318" cy="336" rx="8" ry="4.5" fill="#F43F5E"/>
+    <circle cx="318" cy="336" r="2.2" fill="#FFF1F2"/>
+    <path d="M286 364 Q300 370 314 363" stroke="#94A3B8" stroke-width="3" fill="none" stroke-linecap="round"/>
+  </svg>`
+)}`;
+
+const werewolfCardImg = resolveCardImage('role_card_werewolf_1793769760093.jpg', HUMAN_WOLF_SVG_FALLBACK);
+const wolfCubCardImg = resolveCardImage('role_card_wolf_cub_1793783231025.jpg', werewolfCardImg);
+const humanWolfCardImg = resolveCardImage('role_card_human_wolf_1795231094178.jpg', HUMAN_WOLF_SVG_FALLBACK);
+const seerCardImg = resolveCardImage('role_card_seer_1793769760933.jpg', '');
+const bodyguardCardImg = resolveCardImage('role_card_bodyguard_1793769761764.jpg', '');
+const beggarCardImg = resolveCardImage('role_card_beggar_1793783231788.jpg', '');
+const villagerCardImg = resolveCardImage('role_card_villager_1793769761504.jpg', '');
+const villageBackdropImg = resolveCardImage('werewolf_village_backdrop_1793769757998.jpg', '');
 
 export type RoleType =
   | 'WEREWOLF'

@@ -4830,8 +4830,8 @@ export default function App() {
                   พร้อมอัปขึ้น GitHub & Deploy บน Render.com ได้ทันที (มี render.yaml และ .env.example ครบ)
                 </p>
                 <p className="text-slate-400">
-                  Build Command: <code className="text-amber-300">npm install --include=dev && npm run build</code> · Start Command:{' '}
-                  <code className="text-amber-300">npx tsx server.ts</code>
+                  Build Command: <code className="text-amber-300">npm install --include=dev --legacy-peer-deps && npm run build</code> · Start Command:{' '}
+                  <code className="text-amber-300">npm start</code>
                 </p>
               </div>
               <a

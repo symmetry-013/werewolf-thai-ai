@@ -429,6 +429,7 @@ const SOURCE_FILES = [
   "src/App.tsx",
   "src/data/werewolfEngine.ts",
   "src/components/VillageCanvas.tsx",
+  "src/components/DeathAnimationOverlay.tsx",
   "src/utils/sound.ts",
 ];
 

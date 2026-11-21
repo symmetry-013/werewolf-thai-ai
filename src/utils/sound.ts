@@ -81,7 +81,14 @@ class SoundController {
   }
 
   public playNightAction(
-    role: 'WEREWOLF' | 'WOLF_CUB' | 'SEER' | 'BODYGUARD' | 'BEGGAR' | 'VILLAGER'
+    role:
+      | 'WEREWOLF'
+      | 'WOLF_CUB'
+      | 'HUMAN_WOLF'
+      | 'SEER'
+      | 'BODYGUARD'
+      | 'BEGGAR'
+      | 'VILLAGER'
   ) {
     const ctx = this.getContext();
     if (!ctx) return;
@@ -89,7 +96,7 @@ class SoundController {
     const osc = ctx.createOscillator();
     const gain = ctx.createGain();
 
-    if (role === 'WEREWOLF' || role === 'WOLF_CUB') {
+    if (role === 'WEREWOLF' || role === 'WOLF_CUB' || role === 'HUMAN_WOLF') {
       osc.type = 'sawtooth';
       osc.frequency.setValueAtTime(150, now);
       osc.frequency.exponentialRampToValueAtTime(75, now + 0.28);
