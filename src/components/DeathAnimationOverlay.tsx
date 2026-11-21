@@ -401,7 +401,7 @@ export const DeathAnimationOverlay: React.FC<DeathAnimationOverlayProps> = ({
 
   return (
     <div
-      className={`fixed inset-0 z-[70] flex items-center justify-center overflow-hidden select-none ${
+      className={`fixed inset-0 z-[70] h-[100dvh] w-full flex items-center justify-center overflow-hidden select-none p-4 ${
         isWolfKill ? 'animate-wolf-shake' : 'animate-fire-rumble'
       }`}
       role="dialog"
@@ -545,7 +545,7 @@ export const DeathAnimationOverlay: React.FC<DeathAnimationOverlayProps> = ({
         <svg
           viewBox="0 0 1200 320"
           preserveAspectRatio="none"
-          className="absolute bottom-0 inset-x-0 w-full h-[46vh] pointer-events-none animate-flames-rise"
+          className="absolute bottom-0 inset-x-0 w-full h-[46dvh] pointer-events-none animate-flames-rise"
           aria-hidden="true"
         >
           <defs>
@@ -585,27 +585,27 @@ export const DeathAnimationOverlay: React.FC<DeathAnimationOverlayProps> = ({
       )}
 
       {/* Center Dramatic Message Card */}
-      <div className="relative z-10 max-w-2xl w-full mx-4 px-6 py-8 md:px-10 md:py-10 rounded-2xl text-center space-y-6 animate-death-title-pop bg-black/55 backdrop-blur-sm border border-white/10 shadow-[0_25px_70px_rgba(0,0,0,0.85)]">
+      <div className="relative z-10 max-w-[min(92vw,42rem)] w-full px-5 py-7 sm:px-8 sm:py-9 rounded-2xl text-center space-y-5 animate-death-title-pop bg-black/60 backdrop-blur-sm border border-white/10 shadow-[0_25px_70px_rgba(0,0,0,0.85)]">
         {/* Emblem Icon */}
         <div
-          className={`w-16 h-16 md:w-20 md:h-20 mx-auto rounded-full flex items-center justify-center border-2 ${
+          className={`w-[min(20vw,5rem)] h-[min(20vw,5rem)] mx-auto rounded-full flex items-center justify-center border-2 ${
             isWolfKill
               ? 'bg-red-950/80 border-red-500/80 text-red-400 shadow-[0_0_35px_rgba(239,68,68,0.6)]'
               : 'bg-orange-950/80 border-amber-400/80 text-amber-300 shadow-[0_0_35px_rgba(249,115,22,0.65)]'
           }`}
         >
           {isWolfKill ? (
-            <Skull className="w-9 h-9 md:w-11 md:h-11" />
+            <Skull className="w-[52%] h-[52%]" />
           ) : (
-            <Flame className="w-9 h-9 md:w-11 md:h-11" />
+            <Flame className="w-[52%] h-[52%]" />
           )}
         </div>
 
         {/* Dramatic Headline */}
-        <div className="space-y-3">
+        <div className="space-y-2.5">
           {playerName && (
             <p
-              className={`text-xs md:text-sm font-bold tracking-widest uppercase ${
+              className={`text-xs sm:text-sm font-bold tracking-widest uppercase ${
                 isWolfKill ? 'text-red-300/90' : 'text-amber-300/90'
               }`}
             >
@@ -618,8 +618,9 @@ export const DeathAnimationOverlay: React.FC<DeathAnimationOverlayProps> = ({
           {isWolfKill ? (
             <div className="space-y-2">
               <h1
-                className="text-3xl sm:text-4xl md:text-5xl font-extrabold tracking-tight text-red-500 leading-tight"
+                className="font-extrabold tracking-tight text-red-500 leading-tight"
                 style={{
+                  fontSize: 'clamp(1.6rem, 5.2vw, 3rem)',
                   textShadow:
                     '0 0 18px rgba(220, 38, 38, 0.95), 0 4px 14px rgba(0, 0, 0, 0.95), 0 0 42px rgba(153, 27, 27, 0.85)',
                 }}
@@ -629,7 +630,7 @@ export const DeathAnimationOverlay: React.FC<DeathAnimationOverlayProps> = ({
               {/* Pure SVG bloody drip underline */}
               <svg
                 viewBox="0 0 360 32"
-                className="w-64 sm:w-80 h-6 mx-auto overflow-visible"
+                className="w-[min(70vw,20rem)] h-6 mx-auto overflow-visible"
                 aria-hidden="true"
               >
                 <path
@@ -641,8 +642,9 @@ export const DeathAnimationOverlay: React.FC<DeathAnimationOverlayProps> = ({
             </div>
           ) : (
             <h1
-              className="text-3xl sm:text-4xl md:text-5xl font-extrabold tracking-tight bg-gradient-to-b from-yellow-200 via-amber-400 to-red-600 bg-clip-text text-transparent leading-tight"
+              className="font-extrabold tracking-tight bg-gradient-to-b from-yellow-200 via-amber-400 to-red-600 bg-clip-text text-transparent leading-tight"
               style={{
+                fontSize: 'clamp(1.55rem, 5vw, 3rem)',
                 filter:
                   'drop-shadow(0 0 18px rgba(249, 115, 22, 0.9)) drop-shadow(0 5px 14px rgba(0, 0, 0, 0.95))',
               }}
@@ -651,7 +653,10 @@ export const DeathAnimationOverlay: React.FC<DeathAnimationOverlayProps> = ({
             </h1>
           )}
 
-          <p className="text-sm md:text-base text-slate-200/90 max-w-lg mx-auto leading-relaxed">
+          <p
+            className="text-slate-200/90 max-w-lg mx-auto leading-relaxed"
+            style={{ fontSize: 'clamp(0.85rem, 2.3vw, 1rem)' }}
+          >
             {isWolfKill
               ? 'กรงเล็บของฝูงหมาป่าพรากชีวิตคุณไปในความมืดแล้ว... คุณไม่สามารถโหวตหรือใช้ความสามารถได้อีกต่อไป แต่ยังติดตามเกมในโหมดผู้ชมได้'
               : 'เปลวเพลิงแห่งสภาหมู่บ้านได้กลืนกินคุณตามมติเสียงข้างมากแล้ว... คุณสามารถปิดหน้านี้เพื่อเข้าสู่โหมดผู้ชมและลุ้นผลแพ้ชนะต่อได้'}
@@ -663,7 +668,7 @@ export const DeathAnimationOverlay: React.FC<DeathAnimationOverlayProps> = ({
           <button
             type="button"
             onClick={onClose}
-            className={`inline-flex items-center justify-center gap-2.5 px-7 py-3.5 rounded-xl font-bold text-sm md:text-base transition-all cursor-pointer active:scale-[0.98] ${
+            className={`min-h-[44px] w-full sm:w-auto inline-flex items-center justify-center gap-2.5 px-7 py-3 rounded-xl font-bold text-sm sm:text-base transition-all cursor-pointer active:scale-[0.98] ${
               isWolfKill
                 ? 'bg-red-600 hover:bg-red-500 text-white shadow-[0_0_28px_rgba(220,38,38,0.6)] border border-red-400/50'
                 : 'bg-gradient-to-r from-amber-500 to-orange-600 hover:from-amber-400 hover:to-orange-500 text-slate-950 shadow-[0_0_28px_rgba(249,115,22,0.6)] border border-amber-300/60'

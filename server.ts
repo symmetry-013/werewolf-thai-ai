@@ -430,6 +430,7 @@ const SOURCE_FILES = [
   "src/data/werewolfEngine.ts",
   "src/components/VillageCanvas.tsx",
   "src/components/DeathAnimationOverlay.tsx",
+  "src/components/BodyguardAnimationOverlay.tsx",
   "src/utils/sound.ts",
 ];
 
@@ -628,6 +629,17 @@ function sanitizeSnapshotForRecipient(
       })
     : [];
 
+  // STRICT PRIVACY: Each client ONLY receives their own private Bodyguard shield animation event
+  const rawShieldEvents = snapshot.nightShieldEvents as
+    | { eventId?: string; byPlayer?: Record<string, string> }
+    | null
+    | undefined;
+  const recipientShieldType = rawShieldEvents?.byPlayer?.[recipientPlayerId] || null;
+  const myShieldEvent =
+    recipientShieldType && rawShieldEvents?.eventId
+      ? { eventId: rawShieldEvents.eventId, type: recipientShieldType }
+      : null;
+
   // Host retains full player roles in memory for game-engine night/vote resolution,
   // while non-host players ONLY receive their own role (+ fellow wolf if wolf, + revealed beggar)
   // until GAME_OVER.
@@ -635,6 +647,8 @@ function sanitizeSnapshotForRecipient(
     return {
       ...snapshot,
       messages: filteredMessages,
+      nightShieldEvents: undefined,
+      myShieldEvent,
     };
   }
 
@@ -653,6 +667,8 @@ function sanitizeSnapshotForRecipient(
   return {
     ...snapshot,
     players: sanitizedPlayers,
+    nightShieldEvents: undefined,
+    myShieldEvent,
     seerKnowledge:
       recipientPlayer?.role === "SEER" && Array.isArray(snapshot.seerKnowledge)
         ? snapshot.seerKnowledge

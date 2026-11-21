@@ -58,6 +58,10 @@ import {
   DeathAnimationOverlay,
   DeathAnimationType,
 } from './components/DeathAnimationOverlay';
+import {
+  BodyguardAnimationOverlay,
+  BodyguardAnimationType,
+} from './components/BodyguardAnimationOverlay';
 import { soundFX } from './utils/sound';
 
 type ShellState =
@@ -243,6 +247,9 @@ export default function App() {
   activeChatTabRef.current = activeChatTab;
   const aiWolfOpenedNightRef = useRef<number>(0);
   const [deathOverlay, setDeathOverlay] = useState<DeathAnimationType | null>(null);
+  const [bodyguardOverlay, setBodyguardOverlay] =
+    useState<BodyguardAnimationType | null>(null);
+  const lastHandledShieldEventIdRef = useRef<string | null>(null);
   const prevMyAliveRef = useRef<boolean | null>(null);
   const player1NameInputRef = useRef<HTMLInputElement | null>(null);
   const friendNicknameInputRef = useRef<HTMLInputElement | null>(null);
@@ -481,6 +488,8 @@ export default function App() {
               setHasSubmittedVote(false);
               setRoleCardImgError(false);
               setDeathOverlay(null);
+              setBodyguardOverlay(null);
+              lastHandledShieldEventIdRef.current = null;
               const myStartPlayer = snapPlayers.find((p) => p.id === myClientId);
               prevMyAliveRef.current = myStartPlayer ? myStartPlayer.alive : null;
               const amInMatch = Boolean(myStartPlayer);
@@ -489,12 +498,14 @@ export default function App() {
             } else if (data.type === 'GAME_STATE_UPDATED' && data.snapshot) {
               const snap = data.snapshot;
               if (data.hostId) setHostId(data.hostId);
+              let diedInThisSync = false;
               if (Array.isArray(snap.players)) {
                 const meInSnap = (snap.players as Player[]).find(
                   (p) => p.id === myClientId
                 );
                 if (meInSnap) {
                   if (prevMyAliveRef.current === true && !meInSnap.alive) {
+                    diedInThisSync = true;
                     const elim = snap.lastElimination as
                       | { cause: DeathAnimationType; victimIds?: string[] }
                       | null
@@ -516,6 +527,20 @@ export default function App() {
                   prevMyAliveRef.current = meInSnap.alive;
                 }
                 setPlayers(snap.players);
+              }
+              const myShieldEv = snap.myShieldEvent as
+                | { eventId?: string; type?: BodyguardAnimationType }
+                | null
+                | undefined;
+              if (
+                myShieldEv?.eventId &&
+                myShieldEv?.type &&
+                lastHandledShieldEventIdRef.current !== myShieldEv.eventId
+              ) {
+                lastHandledShieldEventIdRef.current = myShieldEv.eventId;
+                if (!diedInThisSync) {
+                  setBodyguardOverlay(myShieldEv.type);
+                }
               }
               if (snap.phase) setPhase(snap.phase);
               if (typeof snap.dayCount === 'number') setDayCount(snap.dayCount);
@@ -1070,6 +1095,8 @@ export default function App() {
     setPhaseDeadlineAt(null);
     aiWolfOpenedNightRef.current = 0;
     setDeathOverlay(null);
+    setBodyguardOverlay(null);
+    lastHandledShieldEventIdRef.current = null;
     prevMyAliveRef.current = true;
     setRoleCardImgError(false);
     setMessages(initialMsgs);
@@ -1111,6 +1138,10 @@ export default function App() {
       postGameReactions?: PostGameReaction[];
       shellState?: ShellState;
       lastElimination?: { cause: DeathAnimationType; victimIds: string[] } | null;
+      nightShieldEvents?: {
+        eventId: string;
+        byPlayer: Record<string, BodyguardAnimationType>;
+      } | null;
     }) => {
       sendWsMessage({
         type: 'SYNC_GAME_STATE',
@@ -2011,6 +2042,56 @@ export default function App() {
         setDeathOverlay('WOLF_KILL');
       }
 
+      // Compute per-player Bodyguard Shield Perspective Animations (strictly privacy-filtered per player on server)
+      const shieldByPlayer: Record<string, BodyguardAnimationType> = {};
+      // 1) Saved Victim's Perspective (non-Bodyguard player attacked by wolves and saved by BG)
+      for (const sv of outcome.savedPlayers) {
+        if (sv.role !== 'BODYGUARD') {
+          shieldByPlayer[sv.id] = 'VICTIM_SAVED';
+        }
+      }
+      // 2) Werewolf's Perspective — Kill Blocked (living Werewolves when BG blocked a kill tonight)
+      if (outcome.savedPlayers.length > 0) {
+        for (const p of players) {
+          if (p.alive && isWerewolfTeam(p.role) && !victimIds.has(p.id)) {
+            shieldByPlayer[p.id] = 'WOLF_BLOCKED';
+          }
+        }
+      }
+      // 3) Bodyguard's Perspective — Successful Protection (including self-save) or Wrong Target
+      const livingBgBeforeNight = players.find(
+        (p) => p.alive && p.role === 'BODYGUARD'
+      );
+      if (
+        livingBgBeforeNight &&
+        !victimIds.has(livingBgBeforeNight.id) &&
+        outcome.protectedId
+      ) {
+        const bgSavedTarget = outcome.savedPlayers.some(
+          (s) => s.id === outcome.protectedId
+        );
+        shieldByPlayer[livingBgBeforeNight.id] = bgSavedTarget
+          ? 'BG_SUCCESS'
+          : 'BG_FAILED';
+      }
+
+      const nightShieldEventsPayload =
+        Object.keys(shieldByPlayer).length > 0
+          ? {
+              eventId: `shield-n${dayCount}-${Date.now()}`,
+              byPlayer: shieldByPlayer,
+            }
+          : null;
+
+      if (
+        nightShieldEventsPayload &&
+        shieldByPlayer[myClientId] &&
+        !victimIds.has(myClientId)
+      ) {
+        lastHandledShieldEventIdRef.current = nightShieldEventsPayload.eventId;
+        setBodyguardOverlay(shieldByPlayer[myClientId]);
+      }
+
       const nightEliminationPayload =
         victimIds.size > 0
           ? { cause: 'WOLF_KILL' as const, victimIds: Array.from(victimIds) }
@@ -2092,6 +2173,7 @@ export default function App() {
           postGameReactions: [],
           shellState: 'GAME_OVER',
           lastElimination: nightEliminationPayload,
+          nightShieldEvents: nightShieldEventsPayload,
         });
 
         if (winCheck.winner) {
@@ -2129,6 +2211,7 @@ export default function App() {
         winSummary: { winner: null, reasonThai: '' },
         shellState: 'PLAYING',
         lastElimination: nightEliminationPayload,
+        nightShieldEvents: nightShieldEventsPayload,
       });
 
       await triggerDayDiscussion(
@@ -2148,6 +2231,7 @@ export default function App() {
       doubleKillNextNight,
       dayCount,
       players,
+      myClientId,
       seerKnowledge,
       bodyguardKnowledge,
       lastProtectedId,
@@ -2911,7 +2995,7 @@ export default function App() {
   };
 
   return (
-    <div className="relative w-screen h-screen overflow-hidden bg-[#070C18] text-slate-100 select-none">
+    <div className="relative w-full max-w-[100vw] h-[100dvh] overflow-hidden bg-[#070C18] text-slate-100 select-none">
       {/* 1. Isolated 60fps Canvas World Layer */}
       <div className="absolute inset-0 z-0">
         <VillageCanvas
@@ -3014,14 +3098,14 @@ export default function App() {
                     placeholder="พิมพ์ชื่อเล่นของคุณ เช่น แบงค์, มิว, โจ้..."
                     maxLength={24}
                     required
-                    className="w-full bg-[#0F172A] border-2 border-amber-500/60 focus:border-amber-400 rounded-xl px-4 py-3 text-base font-bold text-white placeholder:text-slate-500 outline-none select-text"
+                    className="w-full min-h-[48px] bg-[#0F172A] border-2 border-amber-500/60 focus:border-amber-400 rounded-xl px-4 py-3 text-base font-bold text-white placeholder:text-slate-500 outline-none select-text"
                   />
                 </div>
 
                 <button
                   type="submit"
                   disabled={!myName.trim()}
-                  className="w-full py-3.5 px-6 rounded-xl bg-amber-400 hover:bg-amber-300 disabled:opacity-40 text-slate-950 font-bold text-base shadow-[0_0_25px_rgba(245,158,11,0.3)] transition-all cursor-pointer flex items-center justify-center gap-2"
+                  className="w-full min-h-[48px] py-3.5 px-6 rounded-xl bg-amber-400 hover:bg-amber-300 disabled:opacity-40 text-slate-950 font-bold text-base shadow-[0_0_25px_rgba(245,158,11,0.3)] transition-all cursor-pointer flex items-center justify-center gap-2"
                 >
                   <Play className="w-5 h-5 fill-current" />
                   <span>เข้าห้อง #{roomId} เป็นผู้เล่นคนจริง</span>
@@ -3114,7 +3198,7 @@ export default function App() {
                     onChange={(e) => handleMyNameChange(e.target.value)}
                     placeholder="พิมพ์ชื่อเล่นของคุณที่นี่ เช่น นัท, บอส, มิน..."
                     maxLength={24}
-                    className="w-full bg-[#0F172A] border-2 border-amber-500/60 focus:border-amber-400 rounded-xl px-3.5 py-2.5 text-sm font-bold text-white placeholder:text-slate-500 outline-none select-text"
+                    className="w-full min-h-[44px] bg-[#0F172A] border-2 border-amber-500/60 focus:border-amber-400 rounded-xl px-3.5 py-2.5 text-base md:text-sm font-bold text-white placeholder:text-slate-500 outline-none select-text"
                   />
                 </div>
 
@@ -3255,12 +3339,12 @@ export default function App() {
                       onChange={(e) => setNewFriendNameInput(e.target.value)}
                       placeholder="หรือพิมพ์ชื่อเพื่อนที่นั่งข้างๆ เพื่อเพิ่มเก้าอี้คนจริง..."
                       maxLength={24}
-                      className="flex-1 bg-[#0F172A] border border-slate-700 focus:border-amber-400 rounded-xl px-3 py-2 text-xs text-white placeholder:text-slate-500 outline-none select-text"
+                      className="flex-1 min-w-0 min-h-[44px] bg-[#0F172A] border border-slate-700 focus:border-amber-400 rounded-xl px-3 py-2 text-base md:text-xs text-white placeholder:text-slate-500 outline-none select-text"
                     />
                     <button
                       type="submit"
                       disabled={!newFriendNameInput.trim() || humanParticipants.length >= 10}
-                      className="px-3 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 disabled:opacity-40 text-xs font-bold text-amber-300 flex items-center gap-1 shrink-0 cursor-pointer"
+                      className="min-h-[44px] px-3.5 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 disabled:opacity-40 text-xs font-bold text-amber-300 flex items-center gap-1 shrink-0 cursor-pointer"
                     >
                       <UserPlus className="w-3.5 h-3.5" />
                       <span>เพิ่มเพื่อน</span>
@@ -3300,7 +3384,7 @@ export default function App() {
                                 handleEditParticipantName(hp.id, e.target.value)
                               }
                               disabled={!isMe && !isHost}
-                              className="flex-1 bg-transparent text-xs font-bold text-white outline-none border-b border-slate-700 focus:border-amber-400 py-0.5 select-text disabled:border-transparent"
+                              className="flex-1 min-w-0 bg-transparent text-base md:text-xs font-bold text-white outline-none border-b border-slate-700 focus:border-amber-400 py-0.5 select-text disabled:border-transparent"
                               placeholder={`พิมพ์ชื่อผู้เล่น ${idx + 1}...`}
                             />
                             <span className="text-[10px] text-emerald-400 font-medium shrink-0">
@@ -3333,7 +3417,7 @@ export default function App() {
                 <button
                   type="button"
                   onClick={startNewRandomGame}
-                  className="w-full py-3.5 px-6 text-sm md:text-base font-bold text-slate-950 bg-amber-400 hover:bg-amber-300 active:scale-[0.99] rounded-xl shadow-[0_0_30px_rgba(245,158,11,0.35)] transition-all cursor-pointer flex items-center justify-center gap-2.5"
+                  className="w-full min-h-[48px] py-3.5 px-6 text-sm md:text-base font-bold text-slate-950 bg-amber-400 hover:bg-amber-300 active:scale-[0.99] rounded-xl shadow-[0_0_30px_rgba(245,158,11,0.35)] transition-all cursor-pointer flex items-center justify-center gap-2.5"
                 >
                   <Play className="w-5 h-5 fill-current" />
                   <span>
@@ -3439,9 +3523,9 @@ export default function App() {
       {shellState !== 'TITLE_SCREEN' &&
         shellState !== 'FRIEND_JOIN' &&
         shellState !== 'ROLE_REVEAL' && (
-          <div className="absolute inset-0 z-10 pointer-events-none flex flex-col justify-between p-3 md:p-5">
+          <div className="absolute inset-0 z-10 pointer-events-none flex flex-col justify-between p-2 pb-12 sm:p-3 sm:pb-12 md:p-5 md:pb-14">
             {/* Top Perimeter Status Bar */}
-            <div className="flex flex-wrap items-center justify-between gap-3 pointer-events-auto bg-[#0B1324]/95 border border-slate-800/90 rounded-xl px-4 py-2.5 shadow-lg">
+            <div className="shrink-0 flex flex-wrap items-center justify-between gap-2 md:gap-3 pointer-events-auto bg-[#0B1324]/95 border border-slate-800/90 rounded-xl px-3 py-2 md:px-4 md:py-2.5 shadow-lg">
               <div className="flex items-center gap-3 flex-wrap">
                 <div className="flex items-center gap-2">
                   {phase === 'NIGHT_ACTION' ? (
@@ -3572,28 +3656,34 @@ export default function App() {
             </div>
 
             {/* Main Split Playfield */}
-            <div className="flex-1 min-h-0 flex flex-col lg:flex-row items-stretch justify-between gap-4 mt-3">
-              {/* Left Side: Player Roster Strip anchored at the bottom of the Canvas */}
-              <div className="flex-1 flex flex-col justify-end pointer-events-none">
-                <div className="pointer-events-auto bg-[#0B1324]/95 border border-slate-800/90 rounded-xl p-3 shadow-lg">
-                  <div className="flex items-center justify-between mb-2">
-                    <span className="text-xs font-semibold text-slate-300">
-                      ผู้เล่นทั้ง {players.length} คนรอบโต๊ะสภา (คลิกเลือกเป้าหมายได้ทั้งบนโต๊ะหรือปุ่มด้านล่าง)
+            <div className="flex-1 min-h-0 flex flex-col md:flex-row items-stretch justify-between gap-2 md:gap-4 mt-2 md:mt-3">
+              {/* Left Side: Player Roster Strip (Horizontal swipe bar on mobile/tablet, bottom grid on desktop) */}
+              <div className="shrink-0 md:flex-1 flex flex-col md:justify-end pointer-events-none">
+                <div className="pointer-events-auto bg-[#0B1324]/95 border border-slate-800/90 rounded-xl p-2 md:p-3 shadow-lg">
+                  <div className="flex items-center justify-between gap-2 mb-1.5 md:mb-2">
+                    <span className="text-[11px] md:text-xs font-semibold text-slate-300 truncate">
+                      ผู้เล่น {players.length} คน{' '}
+                      <span className="hidden md:inline">
+                        รอบโต๊ะสภา (คลิกเลือกเป้าหมายได้ทั้งบนโต๊ะหรือปุ่มด้านล่าง)
+                      </span>
+                      <span className="md:hidden text-slate-400">
+                        (เลื่อนซ้าย-ขวาเพื่อดู)
+                      </span>
                     </span>
-                    <span className="text-xs text-amber-300 font-mono tabular-nums">
+                    <span className="text-[11px] md:text-xs text-amber-300 font-mono tabular-nums truncate shrink-0 max-w-[52%]">
                       {selectedTargetId === ABSTAIN_VOTE_ID
-                        ? 'เป้าหมาย: งดออกเสียง (ไม่โหวตวันนี้)'
+                        ? 'งดออกเสียง'
                         : selectedTargetId
-                        ? `เป้าหมาย: ${players.find((p) => p.id === selectedTargetId)?.name}${
+                        ? `เป้าหมาย: ${players.find((p) => p.id === selectedTargetId)?.shortName}${
                             secondTargetId
-                              ? ` + ${players.find((p) => p.id === secondTargetId)?.name}`
+                              ? ` + ${players.find((p) => p.id === secondTargetId)?.shortName}`
                               : ''
                           }`
-                        : 'ยังไม่ได้เลือกเป้าหมาย'}
+                        : 'ยังไม่เลือกเป้าหมาย'}
                     </span>
                   </div>
 
-                  <div className="grid grid-cols-2 sm:grid-cols-5 gap-1.5">
+                  <div className="flex md:grid md:grid-cols-2 lg:grid-cols-5 gap-1.5 overflow-x-auto md:overflow-visible no-scrollbar pb-0.5 md:pb-0">
                     {players.map((p, index) => {
                       const selectable = isTargetSelectable(p);
                       const isSelected =
@@ -3615,7 +3705,7 @@ export default function App() {
                           key={p.id}
                           onClick={() => handleSelectPlayerOnCanvas(p.id)}
                           disabled={!p.alive}
-                          className={`text-left px-2.5 py-1.5 rounded-lg border transition-all cursor-pointer ${
+                          className={`min-w-[116px] md:min-w-0 shrink-0 min-h-[44px] text-left px-2.5 py-1.5 rounded-lg border transition-all cursor-pointer ${
                             !p.alive
                               ? 'bg-slate-950/60 border-slate-900 opacity-45 cursor-not-allowed'
                               : signaledByMe && signaledByPartner
@@ -3702,13 +3792,13 @@ export default function App() {
               </div>
 
               {/* Right Side: Thai Moderator & Natural Player Discussion Console (+ Secret Wolf Chat Tab for Werewolves ONLY) */}
-              <div className="w-full lg:w-[470px] xl:w-[530px] h-[55vh] lg:h-full flex flex-col pointer-events-auto bg-[#0B1324]/95 border border-slate-800/90 rounded-xl shadow-2xl overflow-hidden">
+              <div className="w-full md:w-[400px] lg:w-[470px] xl:w-[530px] flex-1 min-h-0 md:flex-none md:h-full flex flex-col pointer-events-auto bg-[#0B1324]/95 border border-slate-800/90 rounded-xl shadow-2xl overflow-hidden">
                 {amWerewolf ? (
-                  <div className="px-3 py-2 border-b border-slate-800 flex items-center gap-2 bg-[#0F172A]">
+                  <div className="shrink-0 px-2.5 md:px-3 py-2 border-b border-slate-800 flex items-center gap-2 bg-[#0F172A]">
                     <button
                       type="button"
                       onClick={() => setActiveChatTab('PUBLIC')}
-                      className={`flex-1 py-1.5 px-2.5 rounded-lg text-xs font-bold flex items-center justify-center gap-1.5 transition-colors cursor-pointer ${
+                      className={`flex-1 min-h-[40px] py-1.5 px-2.5 rounded-lg text-xs font-bold flex items-center justify-center gap-1.5 transition-colors cursor-pointer ${
                         activeChatTab === 'PUBLIC'
                           ? 'bg-amber-500/20 text-amber-300 border border-amber-400/50'
                           : 'bg-slate-900/80 text-slate-400 border border-slate-800 hover:text-slate-200'
@@ -3723,7 +3813,7 @@ export default function App() {
                         setActiveChatTab('WOLF');
                         setUnreadWolfCount(0);
                       }}
-                      className={`flex-1 py-1.5 px-2.5 rounded-lg text-xs font-bold flex items-center justify-center gap-1.5 transition-colors cursor-pointer relative ${
+                      className={`flex-1 min-h-[40px] py-1.5 px-2.5 rounded-lg text-xs font-bold flex items-center justify-center gap-1.5 transition-colors cursor-pointer relative ${
                         activeChatTab === 'WOLF'
                           ? 'bg-red-950/80 text-red-200 border border-red-500/60 shadow-[0_0_12px_rgba(239,68,68,0.2)]'
                           : 'bg-slate-900/80 text-red-300/80 border border-red-900/40 hover:border-red-500/50'
@@ -3739,7 +3829,7 @@ export default function App() {
                     </button>
                   </div>
                 ) : (
-                  <div className="px-4 py-3 border-b border-slate-800 flex items-center justify-between bg-[#0F172A]">
+                  <div className="shrink-0 px-3.5 md:px-4 py-2.5 md:py-3 border-b border-slate-800 flex items-center justify-between bg-[#0F172A]">
                     <div className="flex items-center gap-2">
                       <MessageSquare className="w-4 h-4 text-amber-400" />
                       <h2 className="text-sm font-bold text-white">
@@ -3813,7 +3903,7 @@ export default function App() {
                           e.preventDefault();
                           handleSendWolfMessage();
                         }}
-                        className="p-2.5 border-t border-red-900/60 bg-[#1B0B12] flex items-center gap-2"
+                        className="shrink-0 p-2.5 border-t border-red-900/60 bg-[#1B0B12] flex items-center gap-2"
                       >
                         <input
                           type="text"
@@ -3821,12 +3911,12 @@ export default function App() {
                           onChange={(e) => setWolfChatInput(e.target.value)}
                           placeholder="กระซิบวางแผนกับเพื่อนหมาป่า (ชาวบ้านไม่เห็น)..."
                           disabled={isGeneratingWolfAI}
-                          className="flex-1 bg-slate-950/90 border border-red-900/70 focus:border-red-400 rounded-lg px-3 py-1.5 text-xs text-white placeholder:text-red-300/40 outline-none select-text"
+                          className="flex-1 min-w-0 min-h-[44px] bg-slate-950/90 border border-red-900/70 focus:border-red-400 rounded-lg px-3 py-2 text-base md:text-xs text-white placeholder:text-red-300/40 outline-none select-text"
                         />
                         <button
                           type="submit"
                           disabled={!wolfChatInput.trim() || isGeneratingWolfAI}
-                          className="px-3 py-1.5 rounded-lg bg-red-600 hover:bg-red-500 disabled:opacity-40 text-white font-bold text-xs flex items-center gap-1 cursor-pointer shrink-0"
+                          className="min-h-[44px] px-3.5 py-2 rounded-lg bg-red-600 hover:bg-red-500 disabled:opacity-40 text-white font-bold text-xs flex items-center gap-1 cursor-pointer shrink-0"
                         >
                           <Send className="w-3.5 h-3.5" />
                           <span>กระซิบ</span>
@@ -3835,7 +3925,7 @@ export default function App() {
                     )}
                   </div>
                 ) : (
-                  <div className="flex-1 overflow-y-auto p-4 space-y-3">
+                  <div className="flex-1 min-h-0 overflow-y-auto p-3 md:p-4 space-y-2.5 md:space-y-3">
                     {visibleMessages.map((m) => {
                       const isMod = m.senderId === 'moderator';
                       const isSecret = m.senderId === 'secret' || m.isSecret;
@@ -3900,7 +3990,7 @@ export default function App() {
                 )}
 
                 {/* Phase Action Footer */}
-                <div className="p-3.5 border-t border-slate-800 bg-[#0F172A] space-y-2.5">
+                <div className="shrink-0 max-h-[44dvh] md:max-h-none overflow-y-auto p-2.5 sm:p-3.5 border-t border-slate-800 bg-[#0F172A] space-y-2">
                   {/* PHASE 1: NIGHT ACTION CONTROLS */}
                   {phase === 'NIGHT_ACTION' && (
                     <div className="space-y-2.5">
@@ -3926,7 +4016,7 @@ export default function App() {
                                   },
                                 })
                               }
-                              className="w-full py-2 px-4 rounded-lg bg-slate-800 hover:bg-slate-700 text-amber-300 font-bold text-xs transition-colors cursor-pointer"
+                              className="w-full min-h-[44px] py-2.5 px-4 rounded-lg bg-slate-800 hover:bg-slate-700 text-amber-300 font-bold text-xs transition-colors cursor-pointer"
                             >
                               หัวห้อง: ดำเนินการจบคืนที่ {dayCount} ทันที
                             </button>
@@ -3935,7 +4025,7 @@ export default function App() {
                       ) : !myPlayer.alive ? (
                         <button
                           onClick={handleConfirmNightAction}
-                          className="w-full py-2.5 px-4 rounded-lg bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-sm transition-colors cursor-pointer"
+                          className="w-full min-h-[44px] py-2.5 px-4 rounded-lg bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-sm transition-colors cursor-pointer"
                         >
                           ดำเนินการผ่านคืนที่ {dayCount} ({myPlayer.name} เสียชีวิตแล้ว)
                         </button>
@@ -3951,7 +4041,7 @@ export default function App() {
                           </p>
                           <button
                             onClick={handleConfirmNightAction}
-                            className="w-full py-2.5 px-4 rounded-lg bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-sm transition-colors cursor-pointer flex items-center justify-center gap-2"
+                            className="w-full min-h-[44px] py-2.5 px-4 rounded-lg bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-sm transition-colors cursor-pointer flex items-center justify-center gap-2"
                           >
                             <Moon className="w-4 h-4" />
                             <span>เข้านอนและรอจนถึงรุ่งสาง (จบคืนที่ {dayCount})</span>
@@ -4084,7 +4174,7 @@ export default function App() {
                                   <button
                                     key={p.id}
                                     onClick={() => handleSelectPlayerOnCanvas(p.id)}
-                                    className={`px-2.5 py-1 rounded-lg text-xs font-semibold transition-colors cursor-pointer ${
+                                    className={`min-h-[40px] px-3 py-1.5 rounded-lg text-xs font-semibold transition-colors cursor-pointer ${
                                       isChosen && partnerPointing
                                         ? 'bg-emerald-400 text-slate-950 ring-2 ring-emerald-300'
                                         : isChosen
@@ -4106,7 +4196,7 @@ export default function App() {
                               !selectedTargetId ||
                               (requiresWolfConsensus && !wolvesAgreedOnTarget)
                             }
-                            className="w-full py-2.5 px-4 rounded-lg bg-amber-500 hover:bg-amber-400 disabled:bg-slate-800 disabled:text-slate-500 text-slate-950 font-bold text-sm transition-colors cursor-pointer flex items-center justify-center gap-2"
+                            className="w-full min-h-[44px] py-2.5 px-4 rounded-lg bg-amber-500 hover:bg-amber-400 disabled:bg-slate-800 disabled:text-slate-500 text-slate-950 font-bold text-sm transition-colors cursor-pointer flex items-center justify-center gap-2"
                           >
                             <Shield className="w-4 h-4" />
                             <span>
@@ -4185,12 +4275,12 @@ export default function App() {
                                 onChange={(e) => setHumanInput(e.target.value)}
                                 placeholder={`พิมพ์พูดคุย ถามจี้ หรือวิเคราะห์ในชื่อ "${myPlayer.name}"...`}
                                 disabled={isGeneratingAI}
-                                className="flex-1 bg-slate-900 border border-slate-700 focus:border-amber-400 rounded-lg px-3 py-2 text-xs md:text-sm text-white placeholder:text-slate-500 outline-none select-text"
+                                className="flex-1 min-w-0 min-h-[44px] bg-slate-900 border border-slate-700 focus:border-amber-400 rounded-lg px-3 py-2 text-base md:text-sm text-white placeholder:text-slate-500 outline-none select-text"
                               />
                               <button
                                 type="submit"
                                 disabled={!humanInput.trim() || isGeneratingAI}
-                                className="px-3.5 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 disabled:opacity-40 text-amber-300 font-semibold text-xs flex items-center gap-1.5 transition-colors cursor-pointer shrink-0"
+                                className="min-h-[44px] px-3.5 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 disabled:opacity-40 text-amber-300 font-semibold text-xs flex items-center gap-1.5 transition-colors cursor-pointer shrink-0"
                               >
                                 <Send className="w-3.5 h-3.5" />
                                 <span>ส่งข้อความ</span>
@@ -4210,7 +4300,7 @@ export default function App() {
                                 type="button"
                                 onClick={handleContinueAIDebate}
                                 disabled={isGeneratingAI}
-                                className="py-2 px-3 rounded-lg bg-slate-800 hover:bg-slate-700 disabled:opacity-50 text-slate-200 font-semibold text-xs transition-colors cursor-pointer flex items-center justify-center gap-1.5 border border-slate-700"
+                                className="min-h-[44px] py-2 px-3 rounded-lg bg-slate-800 hover:bg-slate-700 disabled:opacity-50 text-slate-200 font-semibold text-xs transition-colors cursor-pointer flex items-center justify-center gap-1.5 border border-slate-700"
                               >
                                 <MessageSquare className="w-3.5 h-3.5 text-amber-400" />
                                 <span>ฟังคนในวงวิเคราะห์กันต่อ</span>
@@ -4228,7 +4318,7 @@ export default function App() {
                                   )
                                 }
                                 disabled={isGeneratingAI}
-                                className={`py-2 px-3 rounded-lg font-bold text-xs transition-colors cursor-pointer flex items-center justify-center gap-1.5 ${
+                                className={`min-h-[44px] py-2 px-3 rounded-lg font-bold text-xs transition-colors cursor-pointer flex items-center justify-center gap-1.5 ${
                                   isMyPhaseReady
                                     ? 'bg-emerald-600 hover:bg-emerald-500 text-white'
                                     : 'bg-amber-500 hover:bg-amber-400 text-slate-950'
@@ -4285,7 +4375,7 @@ export default function App() {
                                   voteTargetId: selectedTargetId,
                                 })
                               }
-                              className="w-full py-2 px-4 rounded-lg bg-red-600 hover:bg-red-500 text-white font-bold text-xs transition-colors cursor-pointer"
+                              className="w-full min-h-[44px] py-2.5 px-4 rounded-lg bg-red-600 hover:bg-red-500 text-white font-bold text-xs transition-colors cursor-pointer"
                             >
                               หัวห้อง: สรุปผลโหวตประหารทันที
                             </button>
@@ -4303,7 +4393,7 @@ export default function App() {
                                 <button
                                   key={p.id}
                                   onClick={() => setSelectedTargetId(p.id)}
-                                  className={`px-2.5 py-1 rounded-lg text-xs font-semibold transition-colors cursor-pointer ${
+                                  className={`min-h-[40px] px-3 py-1.5 rounded-lg text-xs font-semibold transition-colors cursor-pointer ${
                                     selectedTargetId === p.id
                                       ? 'bg-red-500 text-white'
                                       : 'bg-slate-800 text-slate-200 hover:bg-slate-700'
@@ -4315,7 +4405,7 @@ export default function App() {
                             <button
                               type="button"
                               onClick={() => setSelectedTargetId(ABSTAIN_VOTE_ID)}
-                              className={`px-2.5 py-1 rounded-lg text-xs font-bold transition-colors cursor-pointer flex items-center gap-1 border ${
+                              className={`min-h-[40px] px-3 py-1.5 rounded-lg text-xs font-bold transition-colors cursor-pointer flex items-center gap-1 border ${
                                 selectedTargetId === ABSTAIN_VOTE_ID
                                   ? 'bg-amber-400 text-slate-950 border-amber-300'
                                   : 'bg-slate-900 text-amber-200 border-amber-500/40 hover:bg-slate-800'
@@ -4328,7 +4418,7 @@ export default function App() {
                           <button
                             onClick={handleConfirmVote}
                             disabled={!selectedTargetId || isGeneratingAI}
-                            className={`w-full py-2.5 px-4 rounded-lg disabled:bg-slate-800 disabled:text-slate-500 font-bold text-sm transition-colors cursor-pointer ${
+                            className={`w-full min-h-[44px] py-2.5 px-4 rounded-lg disabled:bg-slate-800 disabled:text-slate-500 font-bold text-sm transition-colors cursor-pointer ${
                               selectedTargetId === ABSTAIN_VOTE_ID
                                 ? 'bg-amber-500 hover:bg-amber-400 text-slate-950'
                                 : 'bg-red-600 hover:bg-red-500 text-white'
@@ -4347,7 +4437,7 @@ export default function App() {
                         <button
                           onClick={handleConfirmVote}
                           disabled={isGeneratingAI}
-                          className="w-full py-2.5 px-4 rounded-lg bg-red-600 hover:bg-red-500 text-white font-bold text-sm transition-colors cursor-pointer"
+                          className="w-full min-h-[44px] py-2.5 px-4 rounded-lg bg-red-600 hover:bg-red-500 text-white font-bold text-sm transition-colors cursor-pointer"
                         >
                           {!myPlayer.alive
                             ? 'ดูผลการโหวตของผู้เล่นที่เหลืออยู่'
@@ -4414,12 +4504,12 @@ export default function App() {
                             onChange={(e) => setHumanInput(e.target.value)}
                             placeholder={`คุยวิเคราะห์ต่อก่อนหมดเวลา 5 นาที ในชื่อ "${myPlayer.name}"...`}
                             disabled={isGeneratingAI}
-                            className="flex-1 bg-slate-900 border border-slate-700 focus:border-amber-400 rounded-lg px-3 py-1.5 text-xs md:text-sm text-white placeholder:text-slate-500 outline-none select-text"
+                            className="flex-1 min-w-0 min-h-[44px] bg-slate-900 border border-slate-700 focus:border-amber-400 rounded-lg px-3 py-2 text-base md:text-sm text-white placeholder:text-slate-500 outline-none select-text"
                           />
                           <button
                             type="submit"
                             disabled={!humanInput.trim() || isGeneratingAI}
-                            className="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 disabled:opacity-40 text-amber-300 font-semibold text-xs flex items-center gap-1.5 transition-colors cursor-pointer shrink-0"
+                            className="min-h-[44px] px-3.5 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 disabled:opacity-40 text-amber-300 font-semibold text-xs flex items-center gap-1.5 transition-colors cursor-pointer shrink-0"
                           >
                             <Send className="w-3.5 h-3.5" />
                             <span>ส่ง</span>
@@ -4441,7 +4531,7 @@ export default function App() {
                               'NIGHT_ACTION'
                             )
                           }
-                          className={`w-full py-2.5 px-4 rounded-lg font-bold text-sm transition-colors cursor-pointer flex items-center justify-center gap-2 ${
+                          className={`w-full min-h-[44px] py-2.5 px-4 rounded-lg font-bold text-sm transition-colors cursor-pointer flex items-center justify-center gap-2 ${
                             isMyPhaseReady
                               ? 'bg-emerald-600 hover:bg-emerald-500 text-white'
                               : 'bg-amber-500 hover:bg-amber-400 text-slate-950'
@@ -4475,7 +4565,7 @@ export default function App() {
                   {phase === 'GAME_OVER' && (
                     <button
                       onClick={startNewRandomGame}
-                      className="w-full py-2.5 px-4 rounded-lg bg-amber-400 hover:bg-amber-300 text-slate-950 font-bold text-sm transition-colors cursor-pointer flex items-center justify-center gap-2"
+                      className="w-full min-h-[44px] py-2.5 px-4 rounded-lg bg-amber-400 hover:bg-amber-300 text-slate-950 font-bold text-sm transition-colors cursor-pointer flex items-center justify-center gap-2"
                     >
                       <RotateCcw className="w-4 h-4" />
                       <span>สุ่มบทบาทใหม่และเริ่มเกมรอบต่อไปทันที</span>
@@ -4926,12 +5016,24 @@ export default function App() {
         />
       )}
 
+      {/* 8B. FULL-SCREEN BODYGUARD SHIELD PERSPECTIVE ANIMATIONS */}
+      {bodyguardOverlay && !deathOverlay && (
+        <BodyguardAnimationOverlay
+          type={bodyguardOverlay}
+          playerName={myPlayer?.name || myName}
+          onClose={() => setBodyguardOverlay(null)}
+        />
+      )}
+
       {/* 9. TEMPORARY CORNER ANIMATION PREVIEW BUTTONS */}
-      <div className="fixed bottom-2.5 left-2.5 z-[60] flex items-center gap-1.5 pointer-events-auto">
+      <div className="fixed bottom-1.5 left-2 right-2 md:right-auto z-[60] flex items-center gap-1.5 overflow-x-auto no-scrollbar md:flex-wrap pointer-events-auto">
         <button
           type="button"
-          onClick={() => setDeathOverlay('WOLF_KILL')}
-          className="px-2.5 py-1 rounded-lg bg-red-950/90 hover:bg-red-800/95 text-red-200 border border-red-500/50 text-[11px] font-semibold shadow-lg backdrop-blur-sm transition-colors cursor-pointer flex items-center gap-1"
+          onClick={() => {
+            setBodyguardOverlay(null);
+            setDeathOverlay('WOLF_KILL');
+          }}
+          className="shrink-0 px-2.5 py-1.5 rounded-lg bg-red-950/90 hover:bg-red-800/95 text-red-200 border border-red-500/50 text-[11px] font-semibold shadow-lg backdrop-blur-sm transition-colors cursor-pointer flex items-center gap-1"
           title="ทดสอบแอนิเมชันโดนหมาป่าฆ่าตอนกลางคืน"
         >
           <Skull className="w-3 h-3 text-red-400" />
@@ -4939,12 +5041,63 @@ export default function App() {
         </button>
         <button
           type="button"
-          onClick={() => setDeathOverlay('DAY_EXECUTION')}
-          className="px-2.5 py-1 rounded-lg bg-orange-950/90 hover:bg-orange-800/95 text-amber-200 border border-amber-500/50 text-[11px] font-semibold shadow-lg backdrop-blur-sm transition-colors cursor-pointer flex items-center gap-1"
+          onClick={() => {
+            setBodyguardOverlay(null);
+            setDeathOverlay('DAY_EXECUTION');
+          }}
+          className="shrink-0 px-2.5 py-1.5 rounded-lg bg-orange-950/90 hover:bg-orange-800/95 text-amber-200 border border-amber-500/50 text-[11px] font-semibold shadow-lg backdrop-blur-sm transition-colors cursor-pointer flex items-center gap-1"
           title="ทดสอบแอนิเมชันโดนชาวบ้านโหวตประหารตอนกลางวัน"
         >
           <Flame className="w-3 h-3 text-amber-400" />
           <span>Test Execution</span>
+        </button>
+        <button
+          type="button"
+          onClick={() => {
+            setDeathOverlay(null);
+            setBodyguardOverlay('WOLF_BLOCKED');
+          }}
+          className="shrink-0 px-2.5 py-1.5 rounded-lg bg-sky-950/90 hover:bg-sky-800/95 text-sky-200 border border-sky-400/50 text-[11px] font-semibold shadow-lg backdrop-blur-sm transition-colors cursor-pointer flex items-center gap-1"
+          title="ทดสอบมุมมองหมาป่าเมื่อโดนบอดี้การ์ดบล็อก"
+        >
+          <Shield className="w-3 h-3 text-sky-300" />
+          <span>Test: Wolf Blocked</span>
+        </button>
+        <button
+          type="button"
+          onClick={() => {
+            setDeathOverlay(null);
+            setBodyguardOverlay('VICTIM_SAVED');
+          }}
+          className="shrink-0 px-2.5 py-1.5 rounded-lg bg-amber-950/90 hover:bg-amber-800/95 text-amber-200 border border-amber-400/50 text-[11px] font-semibold shadow-lg backdrop-blur-sm transition-colors cursor-pointer flex items-center gap-1"
+          title="ทดสอบมุมมองเหยื่อที่รอดชีวิตเพราะบอดี้การ์ดช่วยไว้"
+        >
+          <Shield className="w-3 h-3 text-amber-300" />
+          <span>Test: Victim Saved</span>
+        </button>
+        <button
+          type="button"
+          onClick={() => {
+            setDeathOverlay(null);
+            setBodyguardOverlay('BG_SUCCESS');
+          }}
+          className="shrink-0 px-2.5 py-1.5 rounded-lg bg-emerald-950/90 hover:bg-emerald-800/95 text-emerald-200 border border-emerald-400/50 text-[11px] font-semibold shadow-lg backdrop-blur-sm transition-colors cursor-pointer flex items-center gap-1"
+          title="ทดสอบมุมมองบอดี้การ์ดเมื่อปกป้องเป้าหมายสำเร็จ"
+        >
+          <Shield className="w-3 h-3 text-emerald-300" />
+          <span>Test: BG Success</span>
+        </button>
+        <button
+          type="button"
+          onClick={() => {
+            setDeathOverlay(null);
+            setBodyguardOverlay('BG_FAILED');
+          }}
+          className="shrink-0 px-2.5 py-1.5 rounded-lg bg-slate-900/95 hover:bg-slate-800 text-slate-300 border border-slate-500/50 text-[11px] font-semibold shadow-lg backdrop-blur-sm transition-colors cursor-pointer flex items-center gap-1"
+          title="ทดสอบมุมมองบอดี้การ์ดเมื่อปกป้องผิดคน"
+        >
+          <Shield className="w-3 h-3 text-slate-400" />
+          <span>Test: BG Failed</span>
         </button>
       </div>
     </div>
