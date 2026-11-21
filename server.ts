@@ -49,8 +49,8 @@ function getGeminiConfig() {
   if (!isValidKey(apiKey)) return null;
   return {
     apiKey: apiKey.trim(),
-    primaryModel: (process.env.GEMINI_MODEL_PRIMARY || "gemini-2.5-flash-lite").trim(),
-    fastModel: (process.env.GEMINI_MODEL_FAST || "gemini-2.5-flash-lite").trim(),
+    primaryModel: (process.env.GEMINI_MODEL_PRIMARY || "gemini-3.8-flash").trim(),
+    fastModel: (process.env.GEMINI_MODEL_FAST || "gemini-3.5-flash-lite").trim(),
   };
 }
 
@@ -153,12 +153,12 @@ async function callGeminiProvider(params: {
     },
   });
 
-  // Prioritize fast low-latency models with automatic fallback to flash-lite / flash
+  // Prioritize configured fast/primary models with automatic fallback to flash-lite / flash
   const preferPrimary =
     process.env.AI_PREFER_PRIMARY === "true" && params.tier === "primary";
   const modelsToTry = preferPrimary
     ? [cfg.primaryModel, cfg.fastModel, "gemini-2.5-flash-lite", "gemini-2.5-flash"]
-    : [cfg.fastModel, "gemini-2.5-flash-lite", "gemini-2.5-flash", cfg.primaryModel];
+    : [cfg.fastModel, cfg.primaryModel, "gemini-2.5-flash-lite", "gemini-2.5-flash"];
   const uniqueModels = Array.from(new Set(modelsToTry.filter(Boolean)));
 
   let lastErr: any = null;

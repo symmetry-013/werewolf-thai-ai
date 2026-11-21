@@ -38,3 +38,152 @@
 ::-webkit-scrollbar-thumb:hover {
   background: rgba(245, 158, 11, 0.45);
 }
+
+/* =========================================================
+   Full-Screen Death Animations (Werewolf Kill & Execution)
+   ========================================================= */
+
+@keyframes wolf-screen-shake {
+  0%, 100% { transform: translate3d(0, 0, 0) rotate(0deg); }
+  8% { transform: translate3d(-14px, -10px, 0) rotate(-1.2deg); }
+  16% { transform: translate3d(16px, 8px, 0) rotate(1.1deg); }
+  24% { transform: translate3d(-12px, 11px, 0) rotate(-0.9deg); }
+  32% { transform: translate3d(12px, -9px, 0) rotate(0.9deg); }
+  42% { transform: translate3d(-8px, 6px, 0) rotate(-0.5deg); }
+  52% { transform: translate3d(7px, -5px, 0) rotate(0.4deg); }
+  64% { transform: translate3d(-4px, 3px, 0) rotate(0deg); }
+  78% { transform: translate3d(2px, -2px, 0) rotate(0deg); }
+}
+
+@keyframes fire-rumble {
+  0%, 100% { transform: translate3d(0, 0, 0); }
+  12% { transform: translate3d(-5px, 3px, 0); }
+  26% { transform: translate3d(5px, -3px, 0); }
+  40% { transform: translate3d(-3px, 2px, 0); }
+  58% { transform: translate3d(3px, -2px, 0); }
+  75% { transform: translate3d(-1px, 1px, 0); }
+}
+
+@keyframes crimson-vignette-pulse {
+  0%, 100% { opacity: 0.78; transform: scale(1); }
+  50% { opacity: 1; transform: scale(1.03); }
+}
+
+@keyframes slash-flash-fade {
+  0% { opacity: 0.9; }
+  35% { opacity: 0.35; }
+  100% { opacity: 0; }
+}
+
+@keyframes claw-rip {
+  0% {
+    stroke-dashoffset: 1300;
+    opacity: 0;
+  }
+  12% {
+    opacity: 1;
+  }
+  100% {
+    stroke-dashoffset: 0;
+    opacity: 1;
+  }
+}
+
+@keyframes flames-rise-in {
+  0% {
+    transform: translateY(100%) scaleY(0.4);
+    opacity: 0;
+  }
+  100% {
+    transform: translateY(0) scaleY(1);
+    opacity: 1;
+  }
+}
+
+@keyframes flame-flicker-slow {
+  0%, 100% { transform: translateY(0) scaleY(1); }
+  50% { transform: translateY(6px) scaleY(1.08); }
+}
+
+@keyframes flame-flicker-fast {
+  0%, 100% { transform: translateY(0) scaleY(1.04) translateX(0); }
+  33% { transform: translateY(8px) scaleY(0.95) translateX(-8px); }
+  66% { transform: translateY(-4px) scaleY(1.1) translateX(8px); }
+}
+
+@keyframes ash-darken-in {
+  0% { opacity: 0; }
+  100% { opacity: 1; }
+}
+
+@keyframes death-title-pop {
+  0% {
+    opacity: 0;
+    transform: scale(0.84) translateY(16px);
+  }
+  60% {
+    opacity: 1;
+    transform: scale(1.03) translateY(-2px);
+  }
+  100% {
+    opacity: 1;
+    transform: scale(1) translateY(0);
+  }
+}
+
+.animate-wolf-shake {
+  animation: wolf-screen-shake 0.72s cubic-bezier(0.36, 0.07, 0.19, 0.97) both;
+}
+
+.animate-fire-rumble {
+  animation: fire-rumble 0.65s ease-out both;
+}
+
+.animate-crimson-vignette {
+  animation: crimson-vignette-pulse 2.2s ease-in-out infinite;
+}
+
+.animate-slash-flash {
+  animation: slash-flash-fade 0.55s ease-out forwards;
+}
+
+.claw-slash-path {
+  stroke-dasharray: 1300;
+  stroke-dashoffset: 1300;
+}
+
+.claw-slash-1 {
+  animation: claw-rip 0.34s cubic-bezier(0.16, 1, 0.3, 1) 0.04s forwards;
+}
+
+.claw-slash-2 {
+  animation: claw-rip 0.36s cubic-bezier(0.16, 1, 0.3, 1) 0.13s forwards;
+}
+
+.claw-slash-3 {
+  animation: claw-rip 0.34s cubic-bezier(0.16, 1, 0.3, 1) 0.22s forwards;
+}
+
+.animate-flames-rise {
+  transform-origin: bottom center;
+  animation: flames-rise-in 0.85s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+}
+
+.animate-flame-wave-slow {
+  transform-origin: bottom center;
+  animation: flame-flicker-slow 2.1s ease-in-out infinite;
+}
+
+.animate-flame-wave-fast {
+  transform-origin: bottom center;
+  animation: flame-flicker-fast 1.35s ease-in-out infinite;
+}
+
+.animate-ash-darken {
+  animation: ash-darken-in 0.7s ease-out forwards;
+}
+
+.animate-death-title-pop {
+  animation: death-title-pop 0.55s cubic-bezier(0.16, 1, 0.3, 1) 0.18s both;
+}
+
