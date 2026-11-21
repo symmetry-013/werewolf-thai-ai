@@ -64,6 +64,10 @@ import {
   BodyguardAnimationOverlay,
   BodyguardAnimationType,
 } from './components/BodyguardAnimationOverlay';
+import {
+  AnnouncementBannerData,
+  AnnouncementBannerOverlay,
+} from './components/AnnouncementBannerOverlay';
 import { soundFX } from './utils/sound';
 
 type ShellState =
@@ -252,7 +256,10 @@ export default function App() {
   const [deathOverlay, setDeathOverlay] = useState<DeathAnimationType | null>(null);
   const [bodyguardOverlay, setBodyguardOverlay] =
     useState<BodyguardAnimationType | null>(null);
+  const [announcementBanner, setAnnouncementBanner] =
+    useState<AnnouncementBannerData | null>(null);
   const lastHandledShieldEventIdRef = useRef<string | null>(null);
+  const lastHandledAnnouncementIdRef = useRef<string | null>(null);
   const prevMyAliveRef = useRef<boolean | null>(null);
   const player1NameInputRef = useRef<HTMLInputElement | null>(null);
   const friendNicknameInputRef = useRef<HTMLInputElement | null>(null);
@@ -492,7 +499,9 @@ export default function App() {
               setRoleCardImgError(false);
               setDeathOverlay(null);
               setBodyguardOverlay(null);
+              setAnnouncementBanner(null);
               lastHandledShieldEventIdRef.current = null;
+              lastHandledAnnouncementIdRef.current = null;
               const myStartPlayer = snapPlayers.find((p) => p.id === myClientId);
               prevMyAliveRef.current = myStartPlayer ? myStartPlayer.alive : null;
               const amInMatch = Boolean(myStartPlayer);
@@ -543,6 +552,23 @@ export default function App() {
                 lastHandledShieldEventIdRef.current = myShieldEv.eventId;
                 if (!diedInThisSync) {
                   setBodyguardOverlay(myShieldEv.type);
+                }
+              }
+              const pubAnn = snap.publicAnnouncement as
+                | AnnouncementBannerData
+                | null
+                | undefined;
+              if (
+                pubAnn?.eventId &&
+                pubAnn?.type &&
+                lastHandledAnnouncementIdRef.current !== pubAnn.eventId
+              ) {
+                lastHandledAnnouncementIdRef.current = pubAnn.eventId;
+                const iAmVictim =
+                  Array.isArray(pubAnn.victimIds) &&
+                  pubAnn.victimIds.includes(myClientId);
+                if (!diedInThisSync && !iAmVictim) {
+                  setAnnouncementBanner(pubAnn);
                 }
               }
               if (snap.phase) setPhase(snap.phase);
@@ -1099,7 +1125,9 @@ export default function App() {
     aiWolfOpenedNightRef.current = 0;
     setDeathOverlay(null);
     setBodyguardOverlay(null);
+    setAnnouncementBanner(null);
     lastHandledShieldEventIdRef.current = null;
+    lastHandledAnnouncementIdRef.current = null;
     prevMyAliveRef.current = true;
     setRoleCardImgError(false);
     setMessages(initialMsgs);
@@ -1145,6 +1173,7 @@ export default function App() {
         eventId: string;
         byPlayer: Record<string, BodyguardAnimationType>;
       } | null;
+      publicAnnouncement?: AnnouncementBannerData | null;
     }) => {
       sendWsMessage({
         type: 'SYNC_GAME_STATE',
@@ -2100,6 +2129,26 @@ export default function App() {
           ? { cause: 'WOLF_KILL' as const, victimIds: Array.from(victimIds) }
           : null;
 
+      const nightAnnouncementPayload: AnnouncementBannerData =
+        outcome.victimPlayers.length > 0
+          ? {
+              eventId: `ann-n${dayCount}-${Date.now()}`,
+              type: 'OTHER_WOLF_KILL',
+              victimNames: outcome.victimPlayers.map((v) => v.shortName),
+              victimIds: outcome.victimPlayers.map((v) => v.id),
+              cubRageNote: outcome.cubDiedTonight,
+            }
+          : {
+              eventId: `ann-n${dayCount}-${Date.now()}`,
+              type: 'PEACEFUL_NIGHT',
+              victimNames: [],
+            };
+
+      if (!victimIds.has(myClientId)) {
+        lastHandledAnnouncementIdRef.current = nightAnnouncementPayload.eventId;
+        setAnnouncementBanner(nightAnnouncementPayload);
+      }
+
       setPlayers(updatedPlayers);
       setSelectedTargetId(null);
       setSecondTargetId(null);
@@ -2177,6 +2226,7 @@ export default function App() {
           shellState: 'GAME_OVER',
           lastElimination: nightEliminationPayload,
           nightShieldEvents: nightShieldEventsPayload,
+          publicAnnouncement: nightAnnouncementPayload,
         });
 
         if (winCheck.winner) {
@@ -2215,6 +2265,7 @@ export default function App() {
         shellState: 'PLAYING',
         lastElimination: nightEliminationPayload,
         nightShieldEvents: nightShieldEventsPayload,
+        publicAnnouncement: nightAnnouncementPayload,
       });
 
       await triggerDayDiscussion(
@@ -2782,6 +2833,7 @@ export default function App() {
       // - If abstain count >= highest suspect's votes, OR
       // - If top suspects are tied -> NOBODY is executed!
       let executedVictimId: string | null = null;
+      let voteAnnouncementPayload: AnnouncementBannerData | null = null;
       if (maxVotes === 0) {
         soundFX.playMessagePop(true);
         specialResultText = `\n\n✋ มติสภาหมู่บ้าน: ทุกคนเลือก "ไม่โหวต / งดออกเสียง" (${abstainCount} เสียง) จึงไม่มีใครถูกประหารในวันนี้ เพื่อเก็บไว้ตัดสินใจในวันถัดไป`;
@@ -2811,6 +2863,12 @@ export default function App() {
               ? { ...p, alive: true, canVote: false, revealedBeggar: true }
               : p
           );
+          voteAnnouncementPayload = {
+            eventId: `ann-v${dayCount}-${Date.now()}`,
+            type: 'BEGGAR_REVEAL',
+            victimNames: [executedPlayer.shortName],
+            victimIds: [],
+          };
           specialResultText =
             `\n\n🎭 [กติกาพิเศษ: ยาจก / คนงี่เง่า (Beggar / Idiot)] ทันทีที่เพชฌฆาตกำลังจะลงมือ "${executedPlayer.name}" ก็หงายการ์ดเปิดเผยตัวตนว่าเป็น "ยาจก / คนงี่เง่า"! ` +
             `เขารอดชีวิตจากการถูกประหารในวันนี้! แต่จะสูญเสียสิทธิ์ในการลงคะแนนโหวตไปตลอดทั้งเกมที่เหลือ`;
@@ -2819,6 +2877,13 @@ export default function App() {
           updatedPlayers = players.map((p) =>
             p.id === executedPlayer.id ? { ...p, alive: false } : p
           );
+          voteAnnouncementPayload = {
+            eventId: `ann-v${dayCount}-${Date.now()}`,
+            type: 'OTHER_EXECUTION',
+            victimNames: [executedPlayer.shortName],
+            victimIds: [executedPlayer.id],
+            cubRageNote: executedPlayer.role === 'WOLF_CUB',
+          };
 
           if (executedPlayer.role === 'WOLF_CUB') {
             nextDoubleKill = true;
@@ -2837,6 +2902,18 @@ export default function App() {
       if (myBeforeVote?.alive && executedVictimId === myClientId) {
         prevMyAliveRef.current = false;
         setDeathOverlay('DAY_EXECUTION');
+      }
+
+      // Show sleek public execution / Beggar reveal announcement banner to all non-victim viewers
+      if (
+        voteAnnouncementPayload &&
+        !(
+          voteAnnouncementPayload.victimIds &&
+          voteAnnouncementPayload.victimIds.includes(myClientId)
+        )
+      ) {
+        lastHandledAnnouncementIdRef.current = voteAnnouncementPayload.eventId;
+        setAnnouncementBanner(voteAnnouncementPayload);
       }
 
       const dayEliminationPayload = executedVictimId
@@ -2902,6 +2979,7 @@ export default function App() {
           postGameReactions: [],
           shellState: 'GAME_OVER',
           lastElimination: dayEliminationPayload,
+          publicAnnouncement: voteAnnouncementPayload,
         });
 
         if (winCheck.winner) {
@@ -2956,6 +3034,7 @@ export default function App() {
         winSummary,
         shellState: 'PLAYING',
         lastElimination: dayEliminationPayload,
+        publicAnnouncement: voteAnnouncementPayload,
       });
     },
     [
@@ -3445,6 +3524,7 @@ export default function App() {
                   type="button"
                   onClick={() => {
                     setBodyguardOverlay(null);
+                    setAnnouncementBanner(null);
                     setDeathOverlay('WOLF_KILL');
                   }}
                   className="min-h-[38px] px-3 py-1.5 rounded-lg bg-red-950/80 hover:bg-red-800/90 text-red-200 border border-red-500/40 text-xs font-semibold transition-colors cursor-pointer flex items-center gap-1.5"
@@ -3456,6 +3536,7 @@ export default function App() {
                   type="button"
                   onClick={() => {
                     setBodyguardOverlay(null);
+                    setAnnouncementBanner(null);
                     setDeathOverlay('DAY_EXECUTION');
                   }}
                   className="min-h-[38px] px-3 py-1.5 rounded-lg bg-orange-950/80 hover:bg-orange-800/90 text-amber-200 border border-amber-500/40 text-xs font-semibold transition-colors cursor-pointer flex items-center gap-1.5"
@@ -3467,6 +3548,7 @@ export default function App() {
                   type="button"
                   onClick={() => {
                     setDeathOverlay(null);
+                    setAnnouncementBanner(null);
                     setBodyguardOverlay('WOLF_BLOCKED');
                   }}
                   className="min-h-[38px] px-3 py-1.5 rounded-lg bg-sky-950/80 hover:bg-sky-800/90 text-sky-200 border border-sky-400/40 text-xs font-semibold transition-colors cursor-pointer flex items-center gap-1.5"
@@ -3478,6 +3560,7 @@ export default function App() {
                   type="button"
                   onClick={() => {
                     setDeathOverlay(null);
+                    setAnnouncementBanner(null);
                     setBodyguardOverlay('VICTIM_SAVED');
                   }}
                   className="min-h-[38px] px-3 py-1.5 rounded-lg bg-amber-950/80 hover:bg-amber-800/90 text-amber-200 border border-amber-400/40 text-xs font-semibold transition-colors cursor-pointer flex items-center gap-1.5"
@@ -3489,6 +3572,7 @@ export default function App() {
                   type="button"
                   onClick={() => {
                     setDeathOverlay(null);
+                    setAnnouncementBanner(null);
                     setBodyguardOverlay('BG_SUCCESS');
                   }}
                   className="min-h-[38px] px-3 py-1.5 rounded-lg bg-emerald-950/80 hover:bg-emerald-800/90 text-emerald-200 border border-emerald-400/40 text-xs font-semibold transition-colors cursor-pointer flex items-center gap-1.5"
@@ -3500,12 +3584,77 @@ export default function App() {
                   type="button"
                   onClick={() => {
                     setDeathOverlay(null);
+                    setAnnouncementBanner(null);
                     setBodyguardOverlay('BG_FAILED');
                   }}
                   className="min-h-[38px] px-3 py-1.5 rounded-lg bg-slate-900/90 hover:bg-slate-800 text-slate-300 border border-slate-600/50 text-xs font-semibold transition-colors cursor-pointer flex items-center gap-1.5"
                 >
                   <Shield className="w-3.5 h-3.5 text-slate-400" />
                   <span>Test: BG Failed</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setDeathOverlay(null);
+                    setBodyguardOverlay(null);
+                    setAnnouncementBanner({
+                      eventId: `test-other-wolf-${Date.now()}`,
+                      type: 'OTHER_WOLF_KILL',
+                      victimNames: ['ต้น'],
+                    });
+                  }}
+                  className="min-h-[38px] px-3 py-1.5 rounded-lg bg-rose-950/85 hover:bg-rose-800/90 text-rose-200 border border-rose-500/45 text-xs font-semibold transition-colors cursor-pointer flex items-center gap-1.5"
+                >
+                  <Skull className="w-3.5 h-3.5 text-rose-400" />
+                  <span>Test: Other Wolf Kill</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setDeathOverlay(null);
+                    setBodyguardOverlay(null);
+                    setAnnouncementBanner({
+                      eventId: `test-other-exec-${Date.now()}`,
+                      type: 'OTHER_EXECUTION',
+                      victimNames: ['เมย์'],
+                    });
+                  }}
+                  className="min-h-[38px] px-3 py-1.5 rounded-lg bg-amber-950/85 hover:bg-orange-800/90 text-orange-200 border border-orange-500/45 text-xs font-semibold transition-colors cursor-pointer flex items-center gap-1.5"
+                >
+                  <Flame className="w-3.5 h-3.5 text-orange-400" />
+                  <span>Test: Other Execution</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setDeathOverlay(null);
+                    setBodyguardOverlay(null);
+                    setAnnouncementBanner({
+                      eventId: `test-beggar-${Date.now()}`,
+                      type: 'BEGGAR_REVEAL',
+                      victimNames: ['บอล'],
+                    });
+                  }}
+                  className="min-h-[38px] px-3 py-1.5 rounded-lg bg-fuchsia-950/85 hover:bg-fuchsia-800/90 text-fuchsia-200 border border-fuchsia-400/45 text-xs font-semibold transition-colors cursor-pointer flex items-center gap-1.5"
+                >
+                  <Sparkles className="w-3.5 h-3.5 text-fuchsia-300" />
+                  <span>Test: Beggar Reveal</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setDeathOverlay(null);
+                    setBodyguardOverlay(null);
+                    setAnnouncementBanner({
+                      eventId: `test-peaceful-${Date.now()}`,
+                      type: 'PEACEFUL_NIGHT',
+                      victimNames: [],
+                    });
+                  }}
+                  className="min-h-[38px] px-3 py-1.5 rounded-lg bg-cyan-950/85 hover:bg-sky-800/90 text-sky-200 border border-sky-400/45 text-xs font-semibold transition-colors cursor-pointer flex items-center gap-1.5"
+                >
+                  <Sun className="w-3.5 h-3.5 text-amber-300" />
+                  <span>Test: Peaceful Night</span>
                 </button>
               </div>
             </div>
@@ -5225,6 +5374,14 @@ export default function App() {
           type={bodyguardOverlay}
           playerName={myPlayer?.name || myName}
           onClose={() => setBodyguardOverlay(null)}
+        />
+      )}
+
+      {/* 8C. PUBLIC ANNOUNCEMENT BANNERS (OTHER PLAYERS' DEATHS / BEGGAR SURVIVAL / PEACEFUL NIGHT) */}
+      {announcementBanner && !deathOverlay && !bodyguardOverlay && (
+        <AnnouncementBannerOverlay
+          banner={announcementBanner}
+          onClose={() => setAnnouncementBanner(null)}
         />
       )}
     </div>

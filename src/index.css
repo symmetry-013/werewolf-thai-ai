@@ -320,3 +320,74 @@
   scrollbar-width: none;
 }
 
+/* ============================================================
+   Public Announcement Banner Animations (Other Players / Dawn)
+   ============================================================ */
+@keyframes banner-fade-in {
+  0% {
+    opacity: 0;
+  }
+  100% {
+    opacity: 1;
+  }
+}
+
+@keyframes banner-slam {
+  0% {
+    opacity: 0;
+    transform: translateY(-18px) scale(0.92);
+  }
+  60% {
+    opacity: 1;
+    transform: translateY(3px) scale(1.015);
+  }
+  100% {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+@keyframes banner-slash {
+  0% {
+    stroke-dashoffset: 620;
+    opacity: 0;
+  }
+  18% {
+    opacity: 1;
+  }
+  75% {
+    stroke-dashoffset: 0;
+    opacity: 1;
+  }
+  100% {
+    stroke-dashoffset: 0;
+    opacity: 0.72;
+  }
+}
+
+@keyframes banner-countdown {
+  0% {
+    width: 100%;
+  }
+  100% {
+    width: 0%;
+  }
+}
+
+.animate-banner-fade-in {
+  animation: banner-fade-in 0.25s ease-out forwards;
+}
+
+.animate-banner-slam {
+  animation: banner-slam 0.44s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+}
+
+.animate-banner-slash {
+  animation: banner-slash 0.65s cubic-bezier(0.12, 0.9, 0.22, 1) forwards;
+}
+
+.animate-banner-countdown {
+  animation: banner-countdown linear forwards;
+}
+
+

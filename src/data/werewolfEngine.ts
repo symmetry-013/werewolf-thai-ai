@@ -679,7 +679,7 @@ function pickRandom<T>(arr: T[]): T {
   return arr[Math.floor(Math.random() * arr.length)];
 }
 
-// Dynamic, unscripted analytical conversation generator (used when offline or no API key)
+// Dynamic, unscripted Thai close-friend banter generator (used when offline or no API key)
 export function generateLocalDayDiscussion(params: {
   dayNumber: number;
   players: Player[];
@@ -703,7 +703,7 @@ export function generateLocalDayDiscussion(params: {
   if (aliveAI.length === 0) return [];
 
   const lines: { speakerId: string; speakerName: string; text: string; tone: string }[] = [];
-  const victimNames = victimPlayers.map((v) => v.shortName).join(' กับ ');
+  const victimNames = victimPlayers.map((v) => `ไอ้${v.shortName}`).join(' กับ ');
 
   // Shuffle alive AI speakers so the order is always organic
   const shuffledAI = [...aliveAI].sort(() => Math.random() - 0.5);
@@ -715,7 +715,7 @@ export function generateLocalDayDiscussion(params: {
     (k) => !k.isWerewolf && aliveAll.some((p) => p.id === k.targetId)
   );
 
-  // Pick 4 to 5 speakers who will react to each other in sequence
+  // Pick 4 to 5 speakers who will roast and accuse each other in sequence
   const speakers = shuffledAI.slice(0, Math.min(5, shuffledAI.length));
   if (aiSeer && latestWolfFound && !speakers.some((s) => s.id === aiSeer.id)) {
     speakers[0] = aiSeer;
@@ -728,46 +728,46 @@ export function generateLocalDayDiscussion(params: {
     const nonWolfOthers = others.filter((p) => !isWerewolfTeam(p.role));
     const prevSpeaker = idx > 0 ? speakers[idx - 1] : null;
 
-    // 1. If speaker is Seer and found a live werewolf, push on that target naturally
+    // 1. If speaker is Seer and found a live werewolf, call them out hard!
     if (speaker.role === 'SEER' && latestWolfFound) {
       const wolfPlayer = aliveAll.find((p) => p.id === latestWolfFound.targetId);
       if (wolfPlayer) {
         accusedPlayer = wolfPlayer;
         const seerOpenings = [
-          `ทุกคนฟังก่อนนะ จากที่เราจับตาดูและเช็กข้อมูลมาเมื่อคืน เราค่อนข้างมั่นใจเลยว่า ${wolfPlayer.shortName} ไม่ใช่ชาวบ้านแน่ๆ วันนี้อยากให้ทุกคนลองบี้ถาม ${wolfPlayer.shortName} ดู`,
-          `เอาจริงๆ นะ ตอนนี้สายตาเราพุ่งไปที่ ${wolfPlayer.shortName} คนเดียวเลย ข้อมูลในมือเรามันฟ้องชัดมากว่า ${wolfPlayer.shortName} อยู่ฝั่งหมาป่า ถ้าปล่อยไว้คืนหน้าพวกเราลำบากแน่`,
-          `ขอพูดตรงๆ เลยนะเมื่อคืนเราได้ข้อมูลสำคัญมา ${wolfPlayer.shortName} นี่แหละตัวอันตรายของวง ถ้าวันนี้เสียงแตกไม่โหวต ${wolfPlayer.shortName} หมู่บ้านเราเสียเปรียบทันที`,
+          `เห้ยพวกมึงฟังกูก่อน! เมื่อคืนกูส่องเจอเต็มตาเลย ไอ้${wolfPlayer.shortName} แม่งเป็นหมาป่าชัวร์ 100% อย่าไปเชื่อมันตอแหล วันนี้โหวตแม่งออกเลย!`,
+          `เชี่ยเอ๊ย พวกมึงอย่าเพิ่งโง่ไปโหวตมั่ว กูเช็กมาแล้ว ไอ้${wolfPlayer.shortName} นี่แหละตัวหมาป่า โคตรเหลี่ยม ปล่อยไว้คืนหน้าตายห่ากันหมดแน่!`,
+          `กูไม่อ้อมค้อมละนะพวกมึง ไอ้${wolfPlayer.shortName} แม่งหมาป่าแท้ๆ กูมีข้อมูลในมือ ถ้าวันนี้ไม่โหวตไอ้${wolfPlayer.shortName} ออก พวกมึงแม่งโง่ชิบหายแน่!`,
         ];
         lines.push({
           speakerId: speaker.id,
           speakerName: speaker.name,
           text: pickRandom(seerOpenings),
-          tone: 'ชี้เป้าจากข้อมูล',
+          tone: 'เปิดโปงเดือดๆ',
         });
         return;
       }
     }
 
-    // 2. If this speaker was just accused by an earlier speaker, defend themselves naturally!
+    // 2. If this speaker was just accused by an earlier speaker, clap back hard!
     if (accusedPlayer && accusedPlayer.id === speaker.id && prevSpeaker) {
       const nextSuspect =
         others.find((p) => p.id !== prevSpeaker.id) || prevSpeaker;
       const defenses = [
-        `เดี๋ยวนะ ${prevSpeaker.shortName} ทำไมจู่ๆ ถึงพุ่งเป้ามาที่เราล่ะ? เมื่อคืนเราก็อยู่เฉยๆ ไม่ได้มีพิรุธอะไรเลย หรือที่ ${prevSpeaker.shortName} รีบชี้เราก่อนเพราะอยากเบี่ยงประเด็นจาก ${nextSuspect.shortName} กันแน่?`,
-        `ใจเย็นก่อนทุกคน ที่ ${prevSpeaker.shortName} สงสัยเรานี่คิดผิดแล้ว เราฝั่งชาวบ้านเต็มตัว ถ้าวันนี้โหวตเราออก หมาป่าได้ฟรีไปอีกวันเลยนะ ลองดูท่าทีของ ${prevSpeaker.shortName} ก่อนไหมว่าทำไมรีบเปิดชื่อเราจัง`,
-        `อ้าว ${prevSpeaker.shortName} โยนมาให้เราเฉยเลย เราบริสุทธิ์ใจ 100% ถามอะไรตอบได้หมด แต่คนที่เปิดประเด็นโจมตีคนอื่นตั้งแต่นาทีแรกแบบไม่มีหลักฐานนี่แหละน่าคิดกว่าอีก`,
+        `ตอแหลละไอ้สัส! ไอ้${prevSpeaker.shortName} มึงมั่วเหี้ยไรเนี่ย กูชาวบ้านบริสุทธิ์ มึงนั่นแหละตัวเปิด ปั่นเก่งชิบหาย เดี๋ยวกูว่าไอ้${nextSuspect.shortName} กับมึงอะร่วมมือกัน!`,
+        `เห้ยไอ้${prevSpeaker.shortName} อย่ามาปั่นกู! กูอยู่เฉยๆ แม่งโยนขี้มาให้กูเฉย โคตรเหลี่ยมเลยมึงอะ พวกมึงอย่าโง่เชื่อมันนะ กูไม่ใช่หมาป่าโว้ย!`,
+        `ควายเอ๊ย ไอ้${prevSpeaker.shortName} มึงเอาเหี้ยไรมามั่นใจว่ากูเป็นหมาป่า? รีบโยนเป้าแต่เช้าแบบนี้ มึงนั่นแหละเนียนเหี้ยๆ พวกมึงดูทรงมันดิ เลิ่กลั่กชิบหาย!`,
       ];
       lines.push({
         speakerId: speaker.id,
         speakerName: speaker.name,
         text: pickRandom(defenses),
-        tone: 'แก้ตัวและตั้งคำถามกลับ',
+        tone: 'สวนกลับหัวร้อน',
       });
       accusedPlayer = prevSpeaker;
       return;
     }
 
-    // 3. First speaker of the morning analyzes what happened last night
+    // 3. First speaker of the morning reacts chaotically to last night
     if (idx === 0) {
       const targetToQuestion = isWerewolfTeam(speaker.role)
         ? pickRandom(nonWolfOthers.length > 0 ? nonWolfOthers : others)
@@ -776,32 +776,32 @@ export function generateLocalDayDiscussion(params: {
 
       if (victimPlayers.length > 0) {
         const morningAnalyses = [
-          `เมื่อคืน ${victimNames} โดนเก็บไป แปลว่าหมาป่าเลือกตัดคนที่น่าจะอ่านเกมออกก่อนเพื่อน ว่าแต่ ${targetToQuestion.shortName} คิดยังไงกับแผลเมื่อคืนบ้าง เห็นเงียบๆ มาตั้งแต่เปิดวง?`,
-          `การที่ ${victimNames} ตายเมื่อคืนมันน่าคิดนะ เพราะเมื่อวานคนที่ดูไม่ค่อยลงรอยหรือเล็งๆ ทางนั้นไว้ก็มีไม่กี่คน ตอนนี้เราแอบสงสัยท่าทีของ ${targetToQuestion.shortName} อยู่เหมือนกัน`,
-          `ตอนนี้เราเหลือกันแค่ ${aliveAll.length} คนแล้ว และเมื่อคืน ${victimNames} ก็เพิ่งโดนขย้ำไป เราต้องช่วยกันไล่ดูว่าใครได้ประโยชน์ที่สุดจากการที่ ${victimNames} ไม่อยู่ในวง ส่วนตัวเราอยากฟังความเห็นของ ${targetToQuestion.shortName} ก่อนเลย`,
+          `เชี่ยเอ๊ย เมื่อคืน${victimNames}โดนหมาป่าแดกไปเฉย! ว่าแต่ไอ้${targetToQuestion.shortName} มึงเงียบทำเหี้ยไร รอบที่แล้วมึงก็เลิ่กลั่ก อย่ามาเนียน!`,
+          `สัสเอ๊ย ${victimNames}ตายโง่ๆ เลยเมื่อคืน กูว่าแล้วหมาป่าแม่งเก็บคนฉลาดก่อน ไอ้${targetToQuestion.shortName} มึงดูโคตรเหลี่ยมอะวันนี้ พูดมาดิ๊มึงทำไรเมื่อคืน!`,
+          `ฉิบหายละพวกมึง เหลือกันแค่ ${aliveAll.length} คนเอง ไอ้${targetToQuestion.shortName} มึงอย่ามานั่งเงียบทำเนียน ตอบกูมาซิว่าทำไม${victimNames}ถึงโดนเก็บ!`,
         ];
         lines.push({
           speakerId: speaker.id,
           speakerName: speaker.name,
           text: pickRandom(morningAnalyses),
-          tone: 'วิเคราะห์แผลเมื่อคืน',
+          tone: 'เปิดวงด่าทันที',
         });
       } else {
         const savedAnalyses = [
-          `เมื่อคืนไม่มีคนตายเลย! บอดี้การ์ดกันแม่นมาก แปลว่าเป้าหมายที่หมาป่าเล็งเมื่อคืนยังนั่งอยู่ในวงพวกเรานี่แหละ ${targetToQuestion.shortName} คิดว่าหมาป่าน่าจะเล็งใครเมื่อคืน?`,
-          `รอดยกวงแบบนี้บอดี้การ์ดอ่านใจหมาป่าขาดเลยนะ แต่หมาป่าทั้ง 2 ตัวก็ยังอยู่ครบ เรายังวางใจไม่ได้ ${targetToQuestion.shortName} มีใครที่เล็งไว้ในใจไหมวันนี้?`,
+          `เห้ยเชี่ย! เมื่อคืนไม่มีใครตายโว้ยย บอดี้การ์ดแม่งโคตรตึง! แต่หมาป่ายังอยู่ครบ 2 ตัว ไอ้${targetToQuestion.shortName} มึงทำหน้าเลิ่กลั่กทำเหี้ยไร หรือเมื่อคืนมึงกัดไม่เข้าวะ!`,
+          `5555 หมาป่าแม่งกัดว่าวเมื่อคืน บอดี้การ์ดแบกจัด! ว่าแต่ไอ้${targetToQuestion.shortName} มึงเงียบผิดปกติเลยนะมึง อย่ามาตอแหล พูดมาว่ามึงสงสัยใคร!`,
         ];
         lines.push({
           speakerId: speaker.id,
           speakerName: speaker.name,
           text: pickRandom(savedAnalyses),
-          tone: 'วิเคราะห์สถานการณ์',
+          tone: 'แซวหมาป่ากัดว่าว',
         });
       }
       return;
     }
 
-    // 4. Subsequent speakers react to the ongoing thread, previous votes, or role deductions
+    // 4. Subsequent speakers jump into the chaotic argument
     const suspectPool = isWerewolfTeam(speaker.role)
       ? nonWolfOthers.length > 0
         ? nonWolfOthers
@@ -820,7 +820,6 @@ export function generateLocalDayDiscussion(params: {
 
     accusedPlayer = chosenSuspect;
 
-    // If there were votes yesterday, sometimes analyze vote history
     const yesterdayVote =
       previousVotes.length > 0 ? pickRandom(previousVotes) : null;
 
@@ -828,8 +827,8 @@ export function generateLocalDayDiscussion(params: {
       lines.push({
         speakerId: speaker.id,
         speakerName: speaker.name,
-        text: `ถ้าย้อนดูผลโหวตรอบก่อนที่ ${yesterdayVote.voterName} โหวตไปหา ${yesterdayVote.targetName} แล้วเอามาเทียบกับคนที่รอดมาถึงวันนี้ เรารู้สึกว่าจังหวะการเล่นของ ${chosenSuspect.shortName} ดูแปลกๆ ที่สุด พวกเราลองไล่เช็กตรงนี้กันดีไหม?`,
-        tone: 'ย้อนรอยโหวต',
+        text: `พวกมึงดูรอบที่แล้วดิ ไอ้${yesterdayVote.voterName} แม่งโหวตไปหาไอ้${yesterdayVote.targetName} โคตรแปลก แต่ตอนนี้กูว่าไอ้${chosenSuspect.shortName} อะเนียนเหี้ยๆ ดูทรงแม่งโคตรเหลี่ยม!`,
+        tone: 'ขุดแผลรอบก่อน',
       });
       return;
     }
@@ -839,24 +838,24 @@ export function generateLocalDayDiscussion(params: {
       lines.push({
         speakerId: speaker.id,
         speakerName: speaker.name,
-        text: `จากรูปเกมเมื่อคืนที่ไม่มีใครตาย เราว่า ${lastSaved.targetName} ดูน่าจะอยู่ฝั่งชาวบ้านค่อนข้างสูงเลยแหละ ถ้าจะหาหมาป่าวันนี้ เราว่าไปโฟกัสที่ ${chosenSuspect.shortName} น่าจะได้ลุ้นกว่า`,
-        tone: 'ตัดตัวเลือกช่วยสภา',
+        text: `เออพวกมึง กูว่าไอ้${lastSaved.targetName} แม่งคนดีชัวร์ไม่ต้องไปยุ่งกับมัน ไปบี้ไอ้${chosenSuspect.shortName} ดีกว่า แม่งเงียบชิบหายน่าสงสัยสุดละ!`,
+        tone: 'ชี้เป้าช่วยเพื่อน',
       });
       return;
     }
 
     const followUpThoughts = [
-      `เห็นด้วยกับที่ ${prevSpeaker?.shortName || 'คนเมื่อกี้'} เปิดประเด็นมานะ แต่ถ้ามองอีกมุม คนที่พยายามไหลตามน้ำเงียบๆ อย่าง ${chosenSuspect.shortName} ก็น่าสงสัยไม่แพ้กัน อยากฟังเหตุผลของเจ้าตัวหน่อย`,
-      `เรานั่งฟังมาสักพักละ รู้สึกว่าวันนี้ ${chosenSuspect.shortName} ดูระวังคำพูดเป็นพิเศษ ต่างจากคนที่บริสุทธิ์ใจจริงๆ คนอื่นในวงมองว่าไงกันบ้าง?`,
-      `อย่าลืมนะว่าในวงเรามีพ่อหมาป่ากับลูกหมาป่าช่วยกันรับส่งบทอยู่ ถ้ามีคนนึงเปิดชื่อล่อเป้า อีกคนอาจจะคอยผสมโรง เราเลยอยากจับตาดูคู่ของ ${chosenSuspect.shortName} เป็นพิเศษวันนี้`,
-      `ถ้าถามความเห็นเราตอนนี้ ยังไม่อยากให้รีบฟันธงตามคนเดียว แต่ท่าทีของ ${chosenSuspect.shortName} มีจุดที่ยังตอบไม่เคลียร์อยู่จริงๆ ลองอธิบายมุมมองตัวเองให้วงฟังหน่อยสิ`,
+      `จริงของไอ้${prevSpeaker?.shortName || 'เมื่อกี้'}ว่ะ กูก็ว่าไอ้${chosenSuspect.shortName} แม่งโคตรเหลี่ยม นั่งเงียบไหลตามน้ำแบบนี้ หมาป่าชัดๆ อย่ามาตอแหล!`,
+      `ไอ้${chosenSuspect.shortName} มึงเงียบทำเหี้ยไร รอบที่แล้วมึงก็เลิ่กลั่ก พวกมึงอย่าปล่อยมันรอดไปง่ายๆ นะเว้ย เดี๋ยวโดนมันแดกหมดวง!`,
+      `เชี่ยเอ๊ย พวกมึงอย่ามัวแต่เถียงกันโง่ๆ หมาป่าแม่งนั่งขำอยู่ละมั้ง กูเล็งไอ้${chosenSuspect.shortName} ไว้ตั้งแต่เมื่อกี้ละ ทรงแม่งเนียนเหี้ยๆ!`,
+      `มึงอย่ามาปั่นพวกกูเลยไอ้${chosenSuspect.shortName} พูดจาวกไปวนมาโคตรมีพิรุธ พวกมึงว่าไง วันนี้จัดแม่งเลยป่ะ?`,
     ];
 
     lines.push({
       speakerId: speaker.id,
       speakerName: speaker.name,
       text: pickRandom(followUpThoughts),
-      tone: 'วิเคราะห์ต่อยอด',
+      tone: 'ผสมโรงบี้หนัก',
     });
   });
 
@@ -891,21 +890,21 @@ export function generateLocalReplyToHuman(params: {
 
     if (isWerewolfTeam(mentionedAI.role)) {
       const wolfDefenses = [
-        `เดี๋ยวนะ ${speakerName} ทำไมถึงคิดว่าเราเป็นหมาป่าล่ะ? เรากำลังช่วยวงไล่หาตัวคนร้ายอยู่เลย ถ้า ${speakerName} ชี้มาที่เราแบบนี้ระวังจะเข้าทางหมาป่าตัวจริงนะ เราว่า ${alternativeSuspect.shortName} ต่างหากที่ดูเนียนเงียบมาตั้งนาน`,
-        `ที่ ${speakerName} สงสัยเรานี่มีหลักฐานอะไรหรือเปล่า หรือแค่เดาเอา? เราอยู่ฝั่งชาวบ้านเต็มร้อย ถ้าโหวตเราออกวันนี้ระวังคืนหน้าชาวบ้านจะเสียเปรียบหนักกว่าเดิมนะ`,
+        `ตอแหลละไอ้สัส ไอ้${speakerName}! กูชาวบ้านบริสุทธิ์ มึงนั่นแหละตัวเปิด ปั่นเก่งชิบหาย! พวกมึงไปดูไอ้${alternativeSuspect.shortName} นู่น แม่งเนียนเงียบกว่ากูอีก!`,
+        `เห้ยไอ้${speakerName} มึงมั่วเหี้ยไรวะ โยนมาให้กูเฉย! ถ้าพวกมึงโง่โหวตชาวบ้านอย่างกูออก คืนหน้าโดนหมาป่าแดกเรียบแน่ อย่าไปเชื่อไอ้${speakerName} มันปั่น!`,
       ];
       replies.push({
         speakerId: mentionedAI.id,
         speakerName: mentionedAI.name,
         text: pickRandom(wolfDefenses),
-        tone: 'โต้แย้งด้วยเหตุผล',
+        tone: 'โวยวายกลบเกลื่อน',
       });
     } else if (mentionedAI.role === 'BEGGAR') {
       replies.push({
         speakerId: mentionedAI.id,
         speakerName: mentionedAI.name,
-        text: `เอาสิ ${speakerName} ถ้ายังไม่เชื่อใจเราแล้วอยากลองโหวตพิสูจน์ดูก็ได้นะ แต่เตือนไว้ก่อนเลยว่าถ้าเทเสียงมาโหวตเราวันนี้ วงชาวบ้านจะเสียรอบประหารฟรีๆ ไปหนึ่งวันเต็มๆ ลองหันไปดู ${alternativeSuspect.shortName} ดีกว่าไหม`,
-        tone: 'ท้าพิสูจน์ความจริง',
+        text: `เอาดิไอ้${speakerName} อยากโหวตกูก็โหวตเลยสัส แต่ถ้ามึงโหวตกูออกวันนี้แม่งเสียรอบฟรีทั้งวงนะเว้ย 555 ไปโหวตไอ้${alternativeSuspect.shortName} เหอะควายเอ๊ย!`,
+        tone: 'ท้าโหวตแบบกวนตีน',
       });
     } else if (mentionedAI.role === 'SEER') {
       const foundWolf = seerKnowledge.find(
@@ -915,20 +914,20 @@ export function generateLocalReplyToHuman(params: {
         speakerId: mentionedAI.id,
         speakerName: mentionedAI.name,
         text: foundWolf
-          ? `ใจเย็นๆ นะ ${speakerName} เราอยู่ฝั่งชาวบ้านและถือข้อมูลสำคัญอยู่ด้วย ตอนนี้คนที่อันตรายจริงๆ คือ ${foundWolf.targetName} ต่างหาก อย่าเพิ่งเล็งผิดคนเลย!`
-          : `เราเข้าใจที่ ${speakerName} ตั้งข้อสังเกตนะ แต่ยืนยันตรงนี้เลยว่าเราเป็นคนดีของหมู่บ้านแน่นอน ถ้าเสียเราไปวันนี้วงชาวบ้านจะขาดคนช่วยเช็กข้อมูลสำคัญเลยนะ`,
-        tone: 'ชี้แจงเหตุผล',
+          ? `ไอ้${speakerName} มึงใจเย็นดิ๊โว้ย! กูฝั่งคนดีมีข้อมูลในมือ ตัวหมาป่าจริงๆ คือไอ้${foundWolf.targetName} นู่น มึงอย่ามาโง่ยิงเพื่อนกันเองดิ๊!`
+          : `เชี่ยไอ้${speakerName} มึงอย่ามามั่วใส่กู กูคนดีเต็มตัว ถ้ามึงพาวงโหวตกูออกวันนี้พวกมึงตาบอดทั้งหมู่บ้านแน่!`,
+        tone: 'หัวร้อนห้ามเพื่อน',
       });
     } else {
       const villagerDefenses = [
-        `ถามเราเหรอ ${speakerName}? เราเป็นชาวบ้านธรรมดาที่พยายามอ่านรูปเกมตามเนื้อผ้าเลย ถ้าฟังจากเหตุผลทั้งหมด ตอนนี้เราว่า ${alternativeSuspect.shortName} ดูมีพิรุธมากกว่าเราเยอะนะ`,
-        `เราเข้าใจมุมที่ ${speakerName} สงสัยนะ แต่ลองดูจังหวะการพูดตั้งแต่เช้าสิ เราไม่ได้พยายามเบี่ยงประเด็นช่วยใครเลย ลองเทียบกับท่าทีของ ${alternativeSuspect.shortName} ดูก่อนไหม`,
+        `เอ้าไอ้${speakerName} กูเกี่ยวเหี้ยไรด้วยวะ! กูชาวบ้านธรรมดาโว้ย มึงไปจี้ไอ้${alternativeSuspect.shortName} นู่น แม่งนั่งเงียบโคตรเหลี่ยมเลย!`,
+        `มึงอย่ามาปั่นกูไอ้${speakerName} กูไม่ได้ทำเหี้ยไรผิดเลย ชาวบ้านแท้ๆ 100% พวกมึงลองดูไอ้${alternativeSuspect.shortName} ดิ พิรุธกว่ากูเยอะสัส!`,
       ];
       replies.push({
         speakerId: mentionedAI.id,
         speakerName: mentionedAI.name,
         text: pickRandom(villagerDefenses),
-        tone: 'อธิบายมุมมองตัวเอง',
+        tone: 'เถียงคอเป็นเอ็น',
       });
     }
   }
@@ -943,19 +942,19 @@ export function generateLocalReplyToHuman(params: {
       aliveAll.find((p) => p.id !== ai.id && p.id !== mentionedAI?.id) ||
       aliveAll[0];
     const analyticalFollowUps = [
-      `ฟังที่ ${speakerName} พูดมาก็มีมุมที่น่าคิดนะ${
+      `เออจริงของไอ้${speakerName}ว่ะ${
         mentionedAI
-          ? ` แต่คำตอบของ ${mentionedAI.shortName} เมื่อกี้ก็ยังดูก้ำกึ่งอยู่ ต้องดูว่าคนอื่นเห็นตรงกันไหม`
-          : ` โดยเฉพาะเรื่องการตัดตัวเลือกคนที่ดูไม่มีพิรุธออกไปทีละคน`
+          ? ` กูฟังไอ้${mentionedAI.shortName} แก้ตัวเมื่อกี้แล้วแม่งเลิ่กลั่กชิบหาย อย่าไปเชื่อมัน!`
+          : ` กูก็ตะหงิดๆ อยู่เหมือนกัน พวกมึงอย่าโดนหมาป่าปั่นหัวล่ะ!`
       }`,
-      `ประเด็นของ ${speakerName} น่าสนใจเลย แต่อย่าลืมดู ${otherTarget.shortName} ควบคู่ไปด้วยนะ เพราะถ้าเราโฟกัสจุดเดียวเกินไป หมาป่าอีกตัวอาจจะลอยตัวได้ง่ายๆ`,
-      `เห็นด้วยบางส่วนกับ ${speakerName} นะ เดี๋ยวรอดูท่าทีตอนใกล้โหวตอีกนิดว่าใครพยายามเปลี่ยนทิศทางเสียงโหวตแบบผิดปกติบ้าง`,
+      `เห้ยไอ้${speakerName} มึงก็พูดมีเหตุผลนะ แต่กูว่าไอ้${otherTarget.shortName} แม่งก็น่าสงสัยไม่แพ้กัน นั่งเงียบโคตรเหลี่ยมเลยมึงเอ๊ย!`,
+      `555 เอาแล้วเว้ยเถียงกันยับ! แต่กูขอดูทรงตอนโหวตก่อนนะไอ้${speakerName} ใครแม่งรีบเทเสียงแปลกๆ เดี๋ยวรู้กัน!`,
     ];
     replies.push({
       speakerId: ai.id,
       speakerName: ai.name,
       text: pickRandom(analyticalFollowUps),
-      tone: 'ร่วมวิเคราะห์',
+      tone: 'ผสมโรงแซว',
     });
   });
 
@@ -1034,7 +1033,7 @@ export function generateLocalVotes(params: {
         chosenTarget =
           validTargets.find((t) => t.id === knownAliveWolf.targetId) ||
           chosenTarget;
-        reason = `มั่นใจจากข้อมูลที่ได้ตรวจสอบมาว่า ${chosenTarget.shortName} อยู่ฝ่ายหมาป่า`;
+        reason = `กูมั่นใจ 100% ไอ้${chosenTarget.shortName} แม่งหมาป่าชัวร์ โหวตแม่งเลย!`;
       } else {
         const safeIds = new Set(
           seerKnowledge.filter((k) => !k.isWerewolf).map((k) => k.targetId)
@@ -1049,7 +1048,7 @@ export function generateLocalVotes(params: {
             (a.suspicionScore + (mentionCounts[a.id] || 0) * 6)
         );
         chosenTarget = ranked[0] || chosenTarget;
-        reason = `ตัดคนที่มั่นใจว่าเป็นชาวบ้านออกแล้ว ${chosenTarget.shortName} มีพิรุธในการพูดคุยมากที่สุด`;
+        reason = `ตัดคนชัวร์ออกแล้ว ไอ้${chosenTarget.shortName} แม่งเหลี่ยมสุดในวง!`;
       }
     } else if (ai.role === 'BODYGUARD') {
       const lastProtected =
@@ -1065,7 +1064,7 @@ export function generateLocalVotes(params: {
           (a.suspicionScore + (mentionCounts[a.id] || 0) * 5)
       );
       chosenTarget = ranked[0] || chosenTarget;
-      reason = `ประเมินจากรูปเกมเมื่อคืนและเหตุผลในวงสนทนาวันนี้ ${chosenTarget.shortName} ดูน่าสงสัยที่สุด`;
+      reason = `ดูทรงทั้งวงแล้ว ไอ้${chosenTarget.shortName} แม่งเลิ่กลั่กสุด จัดไป!`;
     } else if (isWerewolfTeam(ai.role)) {
       const nonWolfTargets = validTargets.filter((t) => !wolfIds.has(t.id));
       const ranked = [
@@ -1080,9 +1079,9 @@ export function generateLocalVotes(params: {
       chosenTarget =
         topChoices[Math.floor(Math.random() * topChoices.length)] || chosenTarget;
       reason = pickRandom([
-        `ฟังจากการแก้ตัวและจังหวะการพูดวันนี้แล้ว ยังไม่ค่อยวางใจ ${chosenTarget.shortName}`,
-        `เหตุผลของ ${chosenTarget.shortName} ในสภาวันนี้ดูขัดแย้งกับรูปเกมเมื่อคืน`,
-        `คิดว่า ${chosenTarget.shortName} พยายามชี้นำวงไปในทางที่แปลกเกินไป`,
+        `ไอ้${chosenTarget.shortName} แม่งปั่นเก่งชิบหาย โหวตแม่งออกเหอะ!`,
+        `ทรงไอ้${chosenTarget.shortName} โคตรเหลี่ยม ตอแหลจัดๆ วันนี้ไม่รอดแน่!`,
+        `ไอ้${chosenTarget.shortName} เงียบทำเหี้ยไร เนียนเหี้ยๆ กูโหวตมึงนี่แหละ!`,
       ]);
     } else {
       const ranked = [...validTargets].sort((a, b) => {
@@ -1094,9 +1093,9 @@ export function generateLocalVotes(params: {
       chosenTarget =
         topSuspects[Math.floor(Math.random() * topSuspects.length)] || chosenTarget;
       reason = pickRandom([
-        `วิเคราะห์จากสิ่งที่คุยกันในวงวันนี้แล้ว ท่าทีของ ${chosenTarget.shortName} มีพิรุธที่สุด`,
-        `คำพูดของ ${chosenTarget.shortName} ยังดูไม่เคลียร์เมื่อเทียบกับคนอื่นในสภา`,
-        `สังเกตจังหวะการออกตัวและเหตุผลของ ${chosenTarget.shortName} แล้วดูไม่น่าไว้ใจ`,
+        `ไอ้${chosenTarget.shortName} แม่งเลิ่กลั่กสุดละ อย่ามาตอแหล!`,
+        `กูว่าไอ้${chosenTarget.shortName} โคตรเหลี่ยม ลองเชือดแม่งดูเลย!`,
+        `พูดจาแปลกชิบหาย ไอ้${chosenTarget.shortName} นี่แหละตัวหมาป่า!`,
       ]);
     }
 
@@ -1111,7 +1110,7 @@ export function generateLocalVotes(params: {
         voterName: ai.name,
         targetId: ABSTAIN_VOTE_ID,
         targetName: 'งดออกเสียง (ไม่โหวต)',
-        reason: 'ข้อมูลวันนี้ยังไม่ชัดเจน ขอเก็บสิทธิ์ไว้ดูท่าทีวันพรุ่งนี้ก่อน',
+        reason: 'ยังไม่ชัวร์ว่ะ กลัวโหวตพลาดด่ากันยับ ขอข้ามก่อนละกัน!',
       });
       continue;
     }
@@ -1138,7 +1137,6 @@ export function generateLocalWolfPartnerReply(params: {
   mode: 'OPEN_NIGHT' | 'HUMAN_SIGNAL' | 'HUMAN_CHAT';
 }): { text: string; suggestedTargetId: string | null } {
   const {
-    aiWolf,
     humanWolfName,
     players,
     humanMessage = '',
@@ -1149,7 +1147,7 @@ export function generateLocalWolfPartnerReply(params: {
 
   const alivePrey = players.filter((p) => p.alive && !isWerewolfTeam(p.role));
   if (alivePrey.length === 0) {
-    return { text: 'ตอนนี้แทบไม่เหลือเหยื่อแล้ว ลุยปิดเกมกันเลย!', suggestedTargetId: null };
+    return { text: 'เหลือแค่นี้แดกเรียบแน่ 555 ปิดเกมเลยมึง!', suggestedTargetId: null };
   }
 
   // Check if human mentioned a specific living prey by name in chat
@@ -1165,8 +1163,8 @@ export function generateLocalWolfPartnerReply(params: {
     const pick =
       sorted[Math.floor(Math.random() * Math.min(3, sorted.length))] || alivePrey[0];
     const openers = [
-      `เฮ้ ${humanWolfName} คืนที่ ${nightNumber} แล้ว ฉันส่งซิกเล็งไปที่ "${pick.shortName}" ไว้นะ ดูท่าทางน่าจะอ่านเกมเก่ง ถ้าเห็นตรงกันกดล็อก "${pick.shortName}" ด้วยกันเลย หรือถ้าอยากเก็บคนอื่นกดส่งซิกบอกฉันได้เลย!`,
-      `${humanWolfName} คืนนี้เราลองตัด "${pick.shortName}" ออกจากกระดานก่อนดีไหม? ฉันส่งซิกเลือกไว้แล้วนะ แต่ถ้า ${humanWolfName} เล็งใครอยู่กดส่งซิกมาได้เลย ฉันพร้อมปรับตามให้ตรงกัน!`,
+      `เห้ยไอ้${humanWolfName} คืนที่ ${nightNumber} แล้วโว้ย! กูเล็งไอ้"${pick.shortName}"ไว้ แม่งปากดีน่าจะอ่านเกมออก ถ้ามึงโอเคกดล็อกไอ้"${pick.shortName}"พร้อมกูเลย หรือจะแดกตัวอื่นก็ส่งซิกมา!`,
+      `ไอ้${humanWolfName} คืนนี้เชือดไอ้"${pick.shortName}"ก่อนป่ะ? กูส่งซิกไว้ให้ละ แต่ถ้ามึงหมั่นไส้ตัวอื่นกดเลือกมาเลย เดี๋ยวกูกดตามมึงให้ตรงกัน!`,
     ];
     return {
       text: pickRandom(openers),
@@ -1176,9 +1174,9 @@ export function generateLocalWolfPartnerReply(params: {
 
   if (mode === 'HUMAN_SIGNAL' && signaledPrey) {
     const agreements = [
-      `รับทราบซิก! งั้นฉันเปลี่ยนมาล็อกเป้า "${signaledPrey.shortName}" ให้ตรงกับ ${humanWolfName} เลยนะ ทั้งคู่เห็นตรงกันแล้วกดยืนยันสังหารได้เลย!`,
-      `โอเคเลย ${humanWolfName} เก็บ "${signaledPrey.shortName}" คืนนี้ก็เข้าท่ามาก ฉันส่งซิกล็อก "${signaledPrey.shortName}" ตามแล้ว กดยืนยันได้เลย!`,
-      `จัดไปตามนั้น! ฉันย้ายเป้ามาเป็น "${signaledPrey.shortName}" ให้ตรงกันทั้ง 2 ตัวแล้ว คืนนี้ไม่รอดแน่`,
+      `จัดไปเพื่อน! กูย้ายมาล็อกไอ้"${signaledPrey.shortName}"ตามมึงแล้วไอ้${humanWolfName} ตรงกันทั้งคู่กดแดกแม่งเลย!`,
+      `เออดี ไอ้"${signaledPrey.shortName}"แม่งโคตรน่ารำคาญ กูส่งซิกตามมึงละ กดยืนยันเชือดแม่งได้เลย!`,
+      `5555 เอาไอ้"${signaledPrey.shortName}"นี่แหละโคตรเข้าท่า กูล็อกตรงกับมึงแล้ว คืนนี้ไม่รอดแน่สัส!`,
     ];
     return {
       text: pickRandom(agreements),
@@ -1190,14 +1188,14 @@ export function generateLocalWolfPartnerReply(params: {
   const target = mentionedPrey || signaledPrey || pickRandom(alivePrey);
   if (mentionedPrey) {
     return {
-      text: `เห็นด้วยเลย ${humanWolfName}! งั้นคืนนี้เราล็อกเป้า "${mentionedPrey.shortName}" ด้วยกันนะ ฉันส่งซิกไปที่ "${mentionedPrey.shortName}" ให้แล้ว กดเลือกให้ตรงกันได้เลย`,
+      text: `เอาดิไอ้${humanWolfName}! งั้นคืนนี้แดกไอ้"${mentionedPrey.shortName}"เลย กูส่งซิกล็อกให้แล้ว มึงกดตามได้เลย!`,
       suggestedTargetId: mentionedPrey.id,
     };
   }
 
   const chatReplies = [
-    `เข้าใจแล้ว ${humanWolfName} ตอนนี้ฉันเล็ง "${target.shortName}" ไว้อยู่นะ ถ้าเราตกลงเอาคนนี้ก็กดเลือก "${target.shortName}" ให้ตรงกันทั้งคู่ได้เลย หรืออยากเปลี่ยนคนก็ส่งซิกมาบอกได้เลย!`,
-    `โอเคเลย ฝั่งเรากับ ${humanWolfName} ต้องเนียนๆ ไว้ในตอนเช้า ส่วนคืนนี้ฉันขอส่งซิกไปที่ "${target.shortName}" ก่อน ถ้า ${humanWolfName} เล็งคนอื่นกดส่งซิกมาได้เลย เดี๋ยวฉันกดตามให้ตรงกัน!`,
+    `เออเข้าใจละไอ้${humanWolfName} ตอนนี้กูเล็งไอ้"${target.shortName}"อยู่นะ ถ้ามึงเอาด้วยกดเลือกไอ้"${target.shortName}"พร้อมกูเลย หรืออยากเปลี่ยนเป้าก็ส่งซิกมา!`,
+    `โอเคเพื่อน เช้ามากูกับมึงต้องเนียนๆ หน่อยนะอย่าเลิ่กลั่ก คืนนี้กูส่งซิกไปที่ไอ้"${target.shortName}"ก่อน ถ้ามึงเล็งใครอยู่กดส่งซิกมาเลยเดี๋ยวกูตาม!`,
   ];
   return {
     text: pickRandom(chatReplies),
@@ -1233,7 +1231,7 @@ export function generateLocalPostGameDebrief(params: {
   const leadHuman = humanPlayers[0];
 
   const wolfNames = allWolves
-    .map((w) => `${w.shortName} (${ROLE_INFO[w.role].thaiName})`)
+    .map((w) => `ไอ้${w.shortName}`)
     .join(' กับ ');
 
   return aiPlayers.map((ai) => {
@@ -1248,11 +1246,11 @@ export function generateLocalPostGameDebrief(params: {
         speakerName: ai.name,
         role: ai.role,
         alive: ai.alive,
-        moodTag: 'ขิงจัด / หลอกเนียน',
+        moodTag: 'ขิงยับ / โคตรเหลี่ยม',
         sentiment: 'proud',
         text: partner
-          ? `555 เนียนกริบ! ขอบคุณ ${partner.shortName} ที่ช่วยดึงความสนใจให้${leadHuman && !isWerewolfTeam(leadHuman.role) ? ` ส่วน ${leadHuman.shortName} เกือบจับได้แล้วเชียว แต่สุดท้ายก็หลงกลพวกเราอยู่ดี!` : ' ชาวบ้านรอบนี้หัวหมุนกันหมด!'}`
-          : `บอกแล้วว่าอย่าไว้ใจคนพูดนิ่งๆ รอบนี้ฝูงหมาป่าคุมเกมได้หมดจดจริงๆ!`,
+          ? `555555 โคตรโง่! โดนกูกับไอ้${partner.shortName}หลอกแดกทั้งวง เหลี่ยมจัดๆ!${leadHuman && !isWerewolfTeam(leadHuman.role) ? ` โดยเฉพาะไอ้${leadHuman.shortName} โดนกูปั่นซะหัวหมุนเลยไอ้ควายเอ๊ย!` : ' ชาวบ้านตานี้โง่ชิบหาย!'}`
+          : `555555 โคตรโง่ โดนกูหลอกแดกทั้งวง เหลี่ยมจัดๆ นั่งเนียนนิดเดียวเชื่อกูหมดเลยไอ้สัส!`,
       };
     }
 
@@ -1262,9 +1260,9 @@ export function generateLocalPostGameDebrief(params: {
         speakerName: ai.name,
         role: ai.role,
         alive: ai.alive,
-        moodTag: 'ยอมใจ / ชม MVP',
+        moodTag: 'หัวร้อน / ยอมใจ',
         sentiment: 'praise',
-        text: `${leadHuman && !isWerewolfTeam(leadHuman.role) ? `ยอมรับเลย ${leadHuman.shortName} อ่านเกมโคตรขาด! ` : ''}พยายามตีเนียนสุดชีวิตแล้วนะ${seer ? ` แต่ ${seer.shortName} (เทพพยากรณ์) ดันเปิดทางไว้แม่นเกิน ต้านไม่ไหวจริงๆ รอบหน้าเอาคืนแน่!` : ' ชาวบ้านรอบนี้สามัคคีเกินต้าน!'}`,
+        text: `${leadHuman && !isWerewolfTeam(leadHuman.role) ? `เชี่ยเอ๊ย ไอ้${leadHuman.shortName} มึงอ่านเกมโคตรขาด กูตอแหลแทบตายมึงยังไม่เชื่อ! ` : 'สัสเอ๊ย อุตส่าห์ตีเนียนแทบตาย! '}${seer ? `แถมไอ้${seer.shortName} (หมอดู) แม่งเสือกส่องแม่นอีก ตาหน้ากูเอาคืนแน่พวกมึง!` : 'รอบหน้ากูไม่พลาดแน่ไอ้เวร!'}`,
       };
     }
 
@@ -1276,11 +1274,11 @@ export function generateLocalPostGameDebrief(params: {
           speakerName: ai.name,
           role: ai.role,
           alive: ai.alive,
-          moodTag: 'ภูมิใจ / MVP',
+          moodTag: 'แบกหลังหัก (MVP)',
           sentiment: 'proud',
           text: foundWolf
-            ? `เห็นมั้ย! ฉันส่องเจอ ${foundWolf.targetName} แล้วพยายามใบ้แทบตาย ดีนะที่ทุกคนช่วยกันเก็บหมาป่าได้ครบ โล่งอกสุดๆ!`
-            : `ส่องเช็กชาวบ้านให้ทีละคนจนวงแคบลง สุดท้ายชนะจนได้ ชื่นชมทุกคนที่ช่วยกันวิเคราะห์เลย!`,
+            ? `เห็นมั้ยพวกควาย! กูบอกแล้วว่าไอ้${foundWolf.targetName}เป็นหมาป่า ดีนะพวกมึงยังฉลาดยอมเชื่อกู ไม่งั้นแพ้โง่ๆ ไปแล้ว!`
+            : `กูส่องเช็กให้ทีละตัวจนจับ ${wolfNames} ได้หมด เกมนี้กูแบกหลังหักเลยโว้ย 555!`,
         };
       }
       return {
@@ -1288,9 +1286,9 @@ export function generateLocalPostGameDebrief(params: {
         speakerName: ai.name,
         role: ai.role,
         alive: ai.alive,
-        moodTag: 'หัวร้อน / บ่นยับ',
+        moodTag: 'ด่าเพื่อนยับ / หัวร้อน',
         sentiment: 'roast',
-        text: `โอ๊ยยย! ฉันเป็นเทพพยากรณ์นะ พยายามส่งสัญญาณเรื่อง ${wolfNames || 'หมาป่า'} แทบตายแต่ไม่มีใครฟังเลย โดนปั่นซะเละเทะ โคตรเสียดาย!`,
+        text: `ควายเอ๊ย!! กูเป็นหมอดู กูบอกแล้วว่า${wolfNames || 'มัน'}เป็นหมาป่า พวกมึงแม่งโง่ไปโหวตเพื่อนกันเอง${bodyguard ? ` แถมไอ้${bodyguard.shortName} (บอดี้การ์ด) มึงไปเซฟใครวะเนี่ย ปล่อยกูตายโง่ๆ เลยไอ้เวร!` : ' โคตรหัวร้อนเลยสัส!'}`,
       };
     }
 
@@ -1302,11 +1300,11 @@ export function generateLocalPostGameDebrief(params: {
           speakerName: ai.name,
           role: ai.role,
           alive: ai.alive,
-          moodTag: 'ชมทีม / ภูมิใจ',
+          moodTag: 'โคตรตึง / แบกทีม',
           sentiment: 'praise',
           text: savedSomeone
-            ? `ตอนกลางคืนลุ้นมือสั่นเลยว่าจะกันถูกคนมั้ย ดีใจมากที่ฝ่ายชาวบ้านอ่านเกม ${wolfNames || 'หมาป่า'} ออกและชนะได้สำเร็จ!`
-            : `คุ้มกันสุดตัวแล้วจริงๆ รอบนี้ฝ่ายชาวบ้านเล่นกันคมมาก ชมเลย!`,
+            ? `เชี่ยเอ๊ย ตอนกลางคืนกูเซฟจนมือสั่น ดีนะพวกมึงฉลาดรุมกระทืบ${wolfNames || 'หมาป่า'}จนชนะได้ โคตรสะใจโว้ย!`
+            : `บอดี้การ์ดอย่างกูตึงจัด! จับ${wolfNames || 'หมาป่า'}ย่างสดทั้งคู่ 5555!`,
         };
       }
       return {
@@ -1314,9 +1312,9 @@ export function generateLocalPostGameDebrief(params: {
         speakerName: ai.name,
         role: ai.role,
         alive: ai.alive,
-        moodTag: 'เจ็บใจ / ช็อกจัด',
+        moodTag: 'ช็อกตาค้าง / ด่าหมาป่า',
         sentiment: 'shock',
-        text: `ห๊ะ?! ${wolfNames || 'คู่นั้น'} เป็นหมาป่าเหรอเนี่ย! ฉันดันไปคุ้มกันผิดฝั่งเฉยเลย เล่นเนียนเกิ๊น ขอคารวะเลยแต่รอบหน้าไม่หลงกลแน่!`,
+        text: `เชี่ยเอ๊ย!! ${wolfNames || 'คู่นั้น'}เป็นหมาป่าเหรอวะ?! มึงเนียนเหี้ยๆ เลยไอ้สัส กูดันไปเซฟผิดคนเฉย โดนมึงหลอกควายเลยตานี้!`,
       };
     }
 
@@ -1326,26 +1324,26 @@ export function generateLocalPostGameDebrief(params: {
         speakerName: ai.name,
         role: ai.role,
         alive: ai.alive,
-        moodTag: 'ฮาไม่ไหว / แซวเพื่อน',
+        moodTag: 'ขำลั่นวง / ปั่นจัด',
         sentiment: winner === 'VILLAGE' ? 'praise' : 'roast',
         text: ai.revealedBeggar
-          ? `555 ขำพวกที่โหวตฉันตอนนั้นสุดๆ ฉันเป็นแค่ยาจกเองนะ! พอรู้ว่า ${wolfNames} เป็นหมาป่าแล้วอยากหัวเราะให้ลั่นหมู่บ้าน`
-          : `นั่งดูอยู่เงียบๆ แต่แอบช็อกที่ ${wolfNames} ตีเนียนได้ขนาดนั้น รอบหน้าจัดอีกตาได้เลย!`,
+          ? `555555 พวกควายเอ๊ย โหวตกูทำเหี้ยไร กูแค่ยาจก! พอเห็นเฉลยว่า${wolfNames}เป็นหมาป่าแล้วกูขำท้องแข็งเลยสัส!`
+          : `เชี่ย ${wolfNames} แม่งโคตรเหลี่ยม หลอกพวกมึงซะเปื่อยเลย 5555 จัดอีกตาเลยมั้ยพวกมึง!`,
       };
     }
 
-    // Villagers: mix of praise, roast, and shock based on match outcome
+    // Villagers: unfiltered praising or flaming friends after reveal
     if (winner === 'VILLAGE') {
       return {
         speakerId: ai.id,
         speakerName: ai.name,
         role: ai.role,
         alive: ai.alive,
-        moodTag: ai.alive ? 'ชมเปาะ (MVP)' : 'ช็อกตาค้าง',
+        moodTag: ai.alive ? 'สะใจ / ชมเพื่อน' : 'ช็อกจัด / แก้แค้นสำเร็จ',
         sentiment: ai.alive ? 'praise' : 'shock',
         text: ai.alive
-          ? `${leadHuman && !isWerewolfTeam(leadHuman.role) ? `ต้องชม ${leadHuman.shortName} เลย จับพิรุธโคตรเก่ง! ` : ''}ตอนแรกเกือบหลงเชื่อ ${wolfNames} แล้วนะเนี่ย ดีนะไหวตัวทันก่อนโดนกินหมด!`
-          : `โดนหมาป่าเก็บไปก่อน นั่งลุ้นจนตัวเกร็ง! พอเห็นเฉลยว่า ${wolfNames} เป็นหมาป่าคือช็อกมาก แต่ดีใจที่เพื่อนๆ แก้แค้นให้สำเร็จ!`,
+          ? `${leadHuman && !isWerewolfTeam(leadHuman.role) ? `เอาว่ะไอ้${leadHuman.shortName} โคตรตึง จับโป๊ะโคตรแม่น! ` : ''}เกือบโดน${wolfNames}ตอแหลหลอกแดกแล้วมั้ยล่ะ ดีนะไหวตัวทัน 555!`
+          : `สัสเอ๊ย ${wolfNames} แม่งแอบมากัดกูตายก่อน ดีนะพวกมึงไม่โง่ตามไปเชือดมันแก้แค้นให้กูได้ สะใจชิบหาย!`,
       };
     }
 
@@ -1354,11 +1352,11 @@ export function generateLocalPostGameDebrief(params: {
       speakerName: ai.name,
       role: ai.role,
       alive: ai.alive,
-      moodTag: ai.alive ? 'บ่นยับ / หัวร้อน' : 'ช็อกตาค้าง',
-      sentiment: ai.alive ? 'roast' : 'shock',
+      moodTag: ai.alive ? 'ด่ายับ / หัวร้อนจัด' : 'กูว่าแล้ว / ด่าเพื่อน',
+      sentiment: 'roast',
       text: ai.alive
-        ? `โห ${wolfNames} หลอกกันหน้าตายมาก! ฉันอุตส่าห์ไว้ใจแท้ๆ${bodyguard ? ` ส่วน ${bodyguard.shortName} ก็ช่วยไม่ทัน` : ''} รอบนี้ชาวบ้านโดนปั่นยับเลย หัวร้อนจัด!`
-        : `บอกแล้ววว!! ${wolfNames} มีพิรุธตั้งแต่แรกแต่ไม่มีใครเชื่อฉันเลย สุดท้ายโดนหมาป่ากวาดเรียบ รอบหน้าห้ามพลาดอีกนะ!`,
+        ? `เชี่ยเอ๊ย ${wolfNames} มึงเนียนเหี้ยๆ ตอแหลหน้าตายสัส!${bodyguard ? ` ส่วนไอ้${bodyguard.shortName} บอดี้การ์ดมึงไปเซฟใครวะเนี่ย ปล่อยเซียร์ตายโง่ๆ เลยไอ้เวร!` : ' พวกมึงแม่งโง่เชื่อมันกันหมดวง ควายเอ๊ย!'}`
+        : `กูบอกแล้วว่า${wolfNames}เป็นหมาป่า พวกมึงแม่งโง่ไปโหวตเพื่อนกันเอง ควายเอ๊ย! โดนมันหลอกแดกทั้งวงสมน้ำหน้าชิบหาย!`,
     };
   });
 }

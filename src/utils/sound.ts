@@ -296,6 +296,148 @@ class SoundController {
       osc.stop(t + 0.64);
     });
   }
+
+  // 5. Other Player Killed by Werewolves: eerie distant howl sweep + sharp claw slash
+  public playOtherWolfKill() {
+    const ctx = this.getContext();
+    if (!ctx) return;
+    const now = ctx.currentTime;
+
+    // Eerie wolf howl pitch sweep
+    const howl = ctx.createOscillator();
+    const howlFilter = ctx.createBiquadFilter();
+    const howlGain = ctx.createGain();
+    howl.type = 'sawtooth';
+    howl.frequency.setValueAtTime(195, now);
+    howl.frequency.exponentialRampToValueAtTime(340, now + 0.28);
+    howl.frequency.exponentialRampToValueAtTime(270, now + 0.62);
+    howl.frequency.exponentialRampToValueAtTime(155, now + 0.95);
+
+    howlFilter.type = 'bandpass';
+    howlFilter.frequency.setValueAtTime(520, now);
+    howlFilter.Q.setValueAtTime(3.2, now);
+
+    howlGain.gain.setValueAtTime(0.001, now);
+    howlGain.gain.linearRampToValueAtTime(0.11, now + 0.14);
+    howlGain.gain.exponentialRampToValueAtTime(0.001, now + 0.98);
+
+    howl.connect(howlFilter);
+    howlFilter.connect(howlGain);
+    howlGain.connect(ctx.destination);
+    howl.start(now);
+    howl.stop(now + 1.0);
+
+    // Sharp claw slash burst (filtered white noise)
+    const slashLen = Math.floor(ctx.sampleRate * 0.24);
+    const buffer = ctx.createBuffer(1, slashLen, ctx.sampleRate);
+    const data = buffer.getChannelData(0);
+    for (let i = 0; i < slashLen; i++) {
+      data[i] = (Math.random() * 2 - 1) * Math.exp(-i / (slashLen * 0.35));
+    }
+    const noise = ctx.createBufferSource();
+    noise.buffer = buffer;
+    const bp = ctx.createBiquadFilter();
+    bp.type = 'bandpass';
+    bp.frequency.setValueAtTime(2200, now + 0.08);
+    bp.frequency.exponentialRampToValueAtTime(650, now + 0.3);
+    bp.Q.setValueAtTime(1.5, now + 0.08);
+    const nGain = ctx.createGain();
+    nGain.gain.setValueAtTime(0.001, now + 0.08);
+    nGain.gain.linearRampToValueAtTime(0.24, now + 0.1);
+    nGain.gain.exponentialRampToValueAtTime(0.001, now + 0.32);
+
+    noise.connect(bp);
+    bp.connect(nGain);
+    nGain.connect(ctx.destination);
+    noise.start(now + 0.08);
+  }
+
+  // 6. Other Player Executed by Villagers: fire crackle + dramatic gavel/torch boom
+  public playOtherExecution() {
+    const ctx = this.getContext();
+    if (!ctx) return;
+    const now = ctx.currentTime;
+
+    // Deep dramatic torch/boom impact
+    const boom = ctx.createOscillator();
+    const boomGain = ctx.createGain();
+    boom.type = 'sawtooth';
+    boom.frequency.setValueAtTime(130, now);
+    boom.frequency.exponentialRampToValueAtTime(38, now + 0.45);
+    boomGain.gain.setValueAtTime(0.18, now);
+    boomGain.gain.exponentialRampToValueAtTime(0.001, now + 0.5);
+    boom.connect(boomGain);
+    boomGain.connect(ctx.destination);
+    boom.start(now);
+    boom.stop(now + 0.52);
+
+    // Crackling fire burst
+    const fireLen = Math.floor(ctx.sampleRate * 0.9);
+    const buffer = ctx.createBuffer(1, fireLen, ctx.sampleRate);
+    const data = buffer.getChannelData(0);
+    for (let i = 0; i < fireLen; i++) {
+      const env = Math.exp(-i / (fireLen * 0.55));
+      const crackle = Math.random() > 0.965 ? (Math.random() * 2 - 1) * 1.8 : (Math.random() * 2 - 1) * 0.28;
+      data[i] = crackle * env;
+    }
+    const fireNoise = ctx.createBufferSource();
+    fireNoise.buffer = buffer;
+    const hp = ctx.createBiquadFilter();
+    hp.type = 'highpass';
+    hp.frequency.setValueAtTime(900, now);
+    const fGain = ctx.createGain();
+    fGain.gain.setValueAtTime(0.16, now);
+    fGain.gain.exponentialRampToValueAtTime(0.001, now + 0.92);
+
+    fireNoise.connect(hp);
+    hp.connect(fGain);
+    fGain.connect(ctx.destination);
+    fireNoise.start(now);
+  }
+
+  // 7. Beggar/Idiot Survived Execution: cheeky mischievous ascending flourish
+  public playBeggarReveal() {
+    const ctx = this.getContext();
+    if (!ctx) return;
+    const now = ctx.currentTime;
+    const notes = [392.0, 466.16, 523.25, 622.25, 783.99];
+    notes.forEach((freq, idx) => {
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.type = 'triangle';
+      const t = now + idx * 0.065;
+      osc.frequency.setValueAtTime(freq, t);
+      gain.gain.setValueAtTime(0.001, t);
+      gain.gain.linearRampToValueAtTime(0.11, t + 0.02);
+      gain.gain.exponentialRampToValueAtTime(0.001, t + 0.34);
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+      osc.start(t);
+      osc.stop(t + 0.36);
+    });
+  }
+
+  // 8. Peaceful Night: calm dawn/moonlight chime
+  public playPeacefulNight() {
+    const ctx = this.getContext();
+    if (!ctx) return;
+    const now = ctx.currentTime;
+    const notes = [440, 554.37, 659.25, 880];
+    notes.forEach((freq, idx) => {
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.type = 'sine';
+      const t = now + idx * 0.1;
+      osc.frequency.setValueAtTime(freq, t);
+      gain.gain.setValueAtTime(0.001, t);
+      gain.gain.linearRampToValueAtTime(0.085, t + 0.04);
+      gain.gain.exponentialRampToValueAtTime(0.0008, t + 0.8);
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+      osc.start(t);
+      osc.stop(t + 0.84);
+    });
+  }
 }
 
 export const soundFX = new SoundController();
