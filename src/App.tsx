@@ -238,6 +238,8 @@ export default function App() {
   const [mobileActiveTab, setMobileActiveTab] = useState<'PLAYERS' | 'CHAT' | 'ROLE'>('CHAT');
   const [unreadPublicCount, setUnreadPublicCount] = useState<number>(0);
   const [typingBotId, setTypingBotId] = useState<string | null>(null);
+  const [serverTypingName, setServerTypingName] = useState<string | null>(null);
+  const [isServerBotQueueActive, setIsServerBotQueueActive] = useState<boolean>(false);
   const [revealTabRoleCard, setRevealTabRoleCard] = useState<boolean>(false);
   const [roleCardImgError, setRoleCardImgError] = useState<boolean>(false);
   const [muted, setMuted] = useState<boolean>(false);
@@ -658,6 +660,35 @@ export default function App() {
                 return [...prev, data.chatMessage];
               });
               soundFX.playMessagePop(false);
+            } else if (data.type === 'BOT_TYPING') {
+              if (data.isTyping && (data.botId || data.name)) {
+                setIsServerBotQueueActive(true);
+                setIsGeneratingAI(true);
+                setTypingBotId(data.botId || null);
+                setServerTypingName(data.name || null);
+              } else {
+                setTypingBotId(null);
+                setServerTypingName(null);
+              }
+            } else if (data.type === 'BOT_CHAT_MESSAGE' && data.chatMessage) {
+              const incomingBotMsg = data.chatMessage as ChatMessage;
+              setMessages((prev) => {
+                if (prev.some((m) => m.id === incomingBotMsg.id)) return prev;
+                return [...prev, incomingBotMsg];
+              });
+              setActiveSpeakerId(incomingBotMsg.senderId || null);
+              setTimeout(() => {
+                setActiveSpeakerId((cur) =>
+                  cur === incomingBotMsg.senderId ? null : cur
+                );
+              }, 1600);
+              soundFX.playMessagePop(false);
+            } else if (data.type === 'BOT_QUEUE_DONE') {
+              setIsServerBotQueueActive(false);
+              setIsGeneratingAI(false);
+              setTypingBotId(null);
+              setServerTypingName(null);
+              setActiveSpeakerId(null);
             } else if (data.type === 'WOLF_CHAT_RECEIVED' && data.wolfMessage) {
               setWolfMessages((prev) => {
                 if (prev.some((m) => m.id === data.wolfMessage.id)) return prev;
@@ -715,6 +746,10 @@ export default function App() {
               setPhaseDeadlineAt(null);
               setWolfMessages([]);
               setWolfSignals({});
+              setIsServerBotQueueActive(false);
+              setIsGeneratingAI(false);
+              setTypingBotId(null);
+              setServerTypingName(null);
               setShellState('TITLE_SCREEN');
             }
           } catch {
@@ -1404,10 +1439,13 @@ export default function App() {
     return p.shortName;
   }, []);
 
-  // Rotate realistic LINE-style typing indicator ("ไอ้บอส กำลังพิมพ์...") while LLM is generating
+  // Show server-driven LINE typing indicator ("ไอ้บอส กำลังพิมพ์...") during sequential bot queue,
+  // falling back to local rotation only for non-WS synchronous fallback calls
   useEffect(() => {
+    if (isServerBotQueueActive) return;
     if (!isGeneratingAI) {
       setTypingBotId(null);
+      setServerTypingName(null);
       return;
     }
     const livingAIs = players.filter((p) => p.alive && !p.isHuman);
@@ -1422,7 +1460,7 @@ export default function App() {
     pickRandom();
     const interval = window.setInterval(pickRandom, 1850);
     return () => window.clearInterval(interval);
-  }, [isGeneratingAI, players]);
+  }, [isGeneratingAI, isServerBotQueueActive, players]);
 
   const typingBotPlayer = useMemo(
     () => (typingBotId ? players.find((p) => p.id === typingBotId) || null : null),
@@ -1430,8 +1468,10 @@ export default function App() {
   );
 
   const typingBotName = useMemo(
-    () => (typingBotPlayer ? formatInformalThaiCall(typingBotPlayer) : null),
-    [typingBotPlayer, formatInformalThaiCall]
+    () =>
+      serverTypingName ||
+      (typingBotPlayer ? formatInformalThaiCall(typingBotPlayer) : null),
+    [serverTypingName, typingBotPlayer, formatInformalThaiCall]
   );
 
   // Official Game Master (GM) Ready Pill Notifications in LINE Group Chat
@@ -1990,7 +2030,7 @@ export default function App() {
       try {
         const recentTranscript = baseMessages
           .filter((m) => !m.isSecret && m.senderId !== 'secret')
-          .slice(-15)
+          .slice(-10)
           .map((m) => `${m.senderName}: ${m.text}`);
 
         const res = await fetch('/api/werewolf/discuss', {
@@ -2012,6 +2052,11 @@ export default function App() {
           }),
         });
         const json = await res.json();
+        if (res.ok && json.ok && json.queued) {
+          // Live sequential 4-5s queue streams via WS (BOT_TYPING / BOT_CHAT_MESSAGE / BOT_QUEUE_DONE)
+          setIsServerBotQueueActive(true);
+          return;
+        }
         if (
           res.ok &&
           json.ok &&
@@ -2094,7 +2139,7 @@ export default function App() {
     try {
       const recentTranscript = messages
         .filter((m) => !m.isSecret && m.senderId !== 'secret')
-        .slice(-15)
+        .slice(-10)
         .map((m) => `${m.senderName}: ${m.text}`);
 
       const res = await fetch('/api/werewolf/discuss', {
@@ -2115,6 +2160,10 @@ export default function App() {
         }),
       });
       const json = await res.json();
+      if (res.ok && json.ok && json.queued) {
+        setIsServerBotQueueActive(true);
+        return;
+      }
       if (
         res.ok &&
         json.ok &&
@@ -2553,7 +2602,7 @@ export default function App() {
   const handleSendHumanStatement = async (customText?: string) => {
     if (!myPlayer) return;
     const textToSend = (customText ?? humanInput).trim();
-    if (!textToSend || isGeneratingAI) return;
+    if (!textToSend) return;
     if (!customText) setHumanInput('');
 
     const myMsg: ChatMessage = {
@@ -2593,7 +2642,7 @@ export default function App() {
     try {
       const recentTranscript = nextMessages
         .filter((m) => !m.isSecret && m.senderId !== 'secret')
-        .slice(-15)
+        .slice(-10)
         .map((m) => `${m.senderName}: ${m.text}`);
 
       const res = await fetch('/api/werewolf/discuss', {
@@ -2616,6 +2665,10 @@ export default function App() {
         }),
       });
       const json = await res.json();
+      if (res.ok && json.ok && json.queued) {
+        setIsServerBotQueueActive(true);
+        return;
+      }
       if (
         res.ok &&
         json.ok &&
@@ -2682,6 +2735,10 @@ export default function App() {
 
   // Enter Day Voting Phase (triggered ONLY when ALL living players — humans + AI — confirm ready!)
   const enterVotingPhase = useCallback(() => {
+    setIsServerBotQueueActive(false);
+    setIsGeneratingAI(false);
+    setTypingBotId(null);
+    setServerTypingName(null);
     setPhase('DAY_VOTING');
     setPhaseReadyIds([]);
     setSelectedTargetId(null);
@@ -2729,6 +2786,10 @@ export default function App() {
   const advanceToNextNight = useCallback(
     (reason: 'UNANIMOUS' | 'TIMEOUT' = 'UNANIMOUS') => {
       const nextNight = dayCount + 1;
+      setIsServerBotQueueActive(false);
+      setIsGeneratingAI(false);
+      setTypingBotId(null);
+      setServerTypingName(null);
       setDayCount(nextNight);
       setPhase('NIGHT_ACTION');
       setPhaseReadyIds([]);
@@ -5151,7 +5212,6 @@ export default function App() {
                                 value={humanInput}
                                 onChange={(e) => setHumanInput(e.target.value)}
                                 placeholder={`พิมพ์ข้อความในกลุ่มในชื่อ "${myPlayer.shortName}"...`}
-                                disabled={isGeneratingAI}
                                 className={`flex-1 min-w-0 min-h-[42px] rounded-full px-4 py-1.5 text-base md:text-sm outline-none select-text transition-colors ${
                                   lineDarkMode
                                     ? 'bg-slate-900 border border-slate-700 focus:border-[#06C755] text-white placeholder:text-slate-400'
@@ -5160,7 +5220,7 @@ export default function App() {
                               />
                               <button
                                 type="submit"
-                                disabled={!humanInput.trim() || isGeneratingAI}
+                                disabled={!humanInput.trim()}
                                 className="min-h-[42px] px-4 py-1.5 rounded-full bg-[#06C755] hover:bg-[#05b34c] disabled:opacity-40 text-white font-bold text-xs flex items-center gap-1 transition-colors cursor-pointer shrink-0 shadow-sm"
                               >
                                 <Send className="w-3.5 h-3.5" />
@@ -5374,7 +5434,6 @@ export default function App() {
                             value={humanInput}
                             onChange={(e) => setHumanInput(e.target.value)}
                             placeholder={`คุยต่อในกลุ่มก่อนเข้าคืนที่ ${dayCount + 1}...`}
-                            disabled={isGeneratingAI}
                             className={`flex-1 min-w-0 min-h-[42px] rounded-full px-4 py-1.5 text-base md:text-sm outline-none select-text transition-colors ${
                               lineDarkMode
                                 ? 'bg-slate-900 border border-slate-700 focus:border-[#06C755] text-white placeholder:text-slate-400'
@@ -5383,7 +5442,7 @@ export default function App() {
                           />
                           <button
                             type="submit"
-                            disabled={!humanInput.trim() || isGeneratingAI}
+                            disabled={!humanInput.trim()}
                             className="min-h-[42px] px-4 py-1.5 rounded-full bg-[#06C755] hover:bg-[#05b34c] disabled:opacity-40 text-white font-bold text-xs flex items-center gap-1 transition-colors cursor-pointer shrink-0 shadow-sm"
                           >
                             <Send className="w-3.5 h-3.5" />

@@ -753,6 +753,7 @@ interface RoomState {
   wolfSignals: Record<string, { primary: string | null; secondary?: string | null }>;
   phaseDeadlineAt: number | null;
   phaseTimer: ReturnType<typeof setTimeout> | null;
+  activeBotLoopId: number;
 }
 
 const MAX_HUMAN_PLAYERS = 10;
@@ -776,6 +777,7 @@ function getOrCreateRoom(roomId: string): RoomState {
       wolfSignals: {},
       phaseDeadlineAt: null,
       phaseTimer: null,
+      activeBotLoopId: 0,
     };
     rooms.set(roomId, room);
   }
@@ -788,6 +790,21 @@ function clearRoomPhaseTimer(room: RoomState) {
     room.phaseTimer = null;
   }
   room.phaseDeadlineAt = null;
+}
+
+function cancelRoomBotLoop(room: RoomState) {
+  room.activeBotLoopId += 1;
+  broadcastToRoom(room.roomId, {
+    type: "BOT_TYPING",
+    botId: null,
+    name: null,
+    isTyping: false,
+  });
+  broadcastToRoom(room.roomId, {
+    type: "BOT_QUEUE_DONE",
+    loopId: room.activeBotLoopId,
+    cancelled: true,
+  });
 }
 
 function scheduleDayResultAutoNight(room: RoomState) {
@@ -806,6 +823,7 @@ function scheduleDayResultAutoNight(room: RoomState) {
     }
     room.phaseDeadlineAt = null;
     room.phaseReadyIds = [];
+    cancelRoomBotLoop(room);
     broadcastToRoom(room.roomId, {
       type: "PHASE_READY_UPDATED",
       phaseReadyIds: [],
@@ -860,6 +878,7 @@ function checkAndAdvanceUnanimousPhase(room: RoomState, targetPhase: "DAY_VOTING
     requiredLivingIds.every((id) => room.phaseReadyIds.includes(id))
   ) {
     clearRoomPhaseTimer(room);
+    cancelRoomBotLoop(room);
     room.phaseReadyIds = [];
     broadcastToRoom(room.roomId, {
       type: "PHASE_READY_UPDATED",
@@ -1348,6 +1367,7 @@ async function startServer() {
           );
         } else if (type === "START_GAME") {
           clearRoomPhaseTimer(room);
+          cancelRoomBotLoop(room);
           room.gameStarted = true;
           room.gameSnapshot = snapshot;
           room.pendingNightActions = {};
@@ -1395,6 +1415,9 @@ async function startServer() {
           }
           if (prevPhase !== nextPhase) {
             room.phaseReadyIds = [];
+            if (nextPhase !== "DAY_DISCUSSION" && nextPhase !== "DAY_RESULT") {
+              cancelRoomBotLoop(room);
+            }
             if (nextPhase === "DAY_RESULT") {
               scheduleDayResultAutoNight(room);
             } else {
@@ -1637,6 +1660,7 @@ async function startServer() {
           checkAndAdvanceUnanimousPhase(room, expectedTarget);
         } else if (type === "RETURN_TO_LOBBY") {
           clearRoomPhaseTimer(room);
+          cancelRoomBotLoop(room);
           room.gameStarted = false;
           room.gameSnapshot = null;
           room.pendingNightActions = {};
@@ -1823,7 +1847,785 @@ async function startServer() {
     return "ยังไม่มีประวัติการโหวตก่อนหน้านี้";
   };
 
-  // Endpoint 1: 100% Autonomous Unscripted Thai Day Discussion (Multi-Bot Conversational Flow)
+  // =========================================================================
+  // Sequential Rate-Limit-Safe Bot Chat Engine (4-5s Queue + ~500 Token Prompt
+  // + Hybrid Day-1 0-Token + Groq 8s -> Gemini -> Local Fallback Bank)
+  // =========================================================================
+
+  const sleepMs = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+  const randomBotDelayMs = () => 4000 + Math.floor(Math.random() * 1001); // 4,000 - 5,000 ms
+
+  const formatThaiCall = (p: any): string => {
+    const nick = String(p?.shortName || p?.name || "มึง").replace(/^(ไอ้|อี)/, "");
+    if (p?.gender === "F") return `อี${nick}`;
+    return `ไอ้${nick}`;
+  };
+
+  const formatChatClock = (): string => {
+    const now = new Date();
+    const hh = String(now.getHours()).padStart(2, "0");
+    const mm = String(now.getMinutes()).padStart(2, "0");
+    return `${hh}:${mm}`;
+  };
+
+  const ROLE_THAI_SHORT: Record<string, string> = {
+    WEREWOLF: "พ่อหมาป่า",
+    WOLF_CUB: "ลูกหมาป่า",
+    HUMAN_WOLF: "หมาป่ามนุษย์(หมอดูส่องเห็นเป็นชาวบ้าน)",
+    SEER: "เทพพยากรณ์(หมอดู)",
+    BODYGUARD: "บอดี้การ์ด",
+    BEGGAR: "ยาจก(โดนโหวตจะเปิดการ์ดรอด1ครั้ง)",
+    VILLAGER: "ชาวบ้าน",
+  };
+
+  // คลังประโยคสำรองตามบุคลิก (4 ชาย + 4 หญิง + 2 Wildcard) ใช้ทั้ง Hybrid Day 1 (0 Token) และ Fallback เมื่อ API ติด Limit
+  const LOCAL_FALLBACK_BANK: Record<
+    string,
+    { tone: string; day1: string[]; fallback: string[] }
+  > = {
+    M_HOTHEAD: {
+      tone: "หัวร้อน",
+      day1: [
+        "เห้ยเปิดมาก็เดือดเลยเหรอวะ {target} มึงทำหน้าลุกลี้ลุกลนทำไม พูดมา!",
+        "เอาจริงดิ ใครแม่งเงียบสุดในวงกูเล็งมึงก่อนเลยนะเว้ย โดยเฉพาะ {target}!",
+        "อย่ามัวลีลาพวกมึง ใครเป็นหมาป่าสารภาพมาเลย ไม่งั้นกูไล่บี้ {target} คนแรก!",
+      ],
+      fallback: [
+        "มึงพูดจาแปลกๆ นะ {target} ทำไมรีบโยนขี้จังวะ โคตรมีพิรุธเลยสัส!",
+        "กูไม่เชื่อขี้ปากมึงหรอก {target} เลิกแถแล้วตอบมาตรงๆ ดีกว่า!",
+        "เห้ยพวกมึงดู {target} ดิ แม่งเหลี่ยมจัด รอบนี้กูว่ามีกลิ่นหมาป่าชัวร์!",
+      ],
+    },
+    M_TROLL: {
+      tone: "ปั่นวง",
+      day1: [
+        "5555 ตื่นกันยังพวกมึง กูว่าหน้าอย่าง {target} นี่แหละหมาป่าตัวพ่อเลย",
+        "เอ้าเริ่มเกมปุ๊บ กูขอแทงหวยใส่ {target} ก่อนเลยได้ปะ หน้ามึงดูเหลี่ยมๆ ว่ะ 555",
+        "วงนี้เงียบกริบเลยเว้ย สงสัย {target} กำลังคิดมุกโกหกอยู่ชัวร์ 5555",
+      ],
+      fallback: [
+        "เดี๋ยวๆ 5555 {target} มึงรนอะไรขนาดนั้นวะ หางโผล่แล้วมั้งเพื่อน!",
+        "กูฮาชิบหาย {target} แถจนสีข้างถลอกหมดแล้วมั้งมึงอ่ะ 555",
+        "เอาล่ะพวกมึง กูขอปั่นหน่อยเหอะ {target} แม่งโคตรน่าสงสัยเลยว่ะวันนี้!",
+      ],
+    },
+    M_DETECTIVE: {
+      tone: "จับพิรุธ",
+      day1: [
+        "ใจเย็นพวกมึง วันแรกยังไม่มีข้อมูลชัด แต่กูขอจับตาดู {target} ไว้ก่อนนะ",
+        "ลองดูจังหวะคนพูดในวงดีๆ ดิ ใครรีบเปิดก่อนหรือเงียบเกินอย่าง {target} น่าเช็กหมด",
+        "อย่าเพิ่งเดามั่ว ฟังเหตุผลทุกคนก่อน โดยเฉพาะ {target} มึงคิดยังไงว่ามาดิ๊",
+      ],
+      fallback: [
+        "กูไล่อ่านแชทดูแล้ว ตรรกะของ {target} แม่งแปลกๆ ว่ะ เหมือนพยายามเบี่ยงประเด็น",
+        "สังเกตปะ {target} ไม่ค่อยกล้าชี้ตัวใครเลย แบบนี้มีสิทธิ์เป็นหมาป่าเนียนๆ สูงมาก",
+        "เดี๋ยวลองเช็กคำพูด {target} อีกรอบดิ กูว่าข้อมูลมันขัดกันเองอยู่นะพวกมึง",
+      ],
+    },
+    M_MANIPULATOR: {
+      tone: "ปั่นเนียน",
+      day1: [
+        "กูว่าอย่าเพิ่งรีบโหวตมั่วเลยพวกมึง ลองฟัง {target} พูดก่อนดีกว่า เผื่อมีข้อมูลดีๆ",
+        "แปลกนะ เปิดวันแรกมาทำไมวงมันเงียบจัง {target} มึงดูนิ่งผิดปกติปะเนี่ย",
+        "พวกมึงคิดเหมือนกูปะ ว่าคนเงียบๆ อย่าง {target} นี่แหละชอบแอบซุ่มสุดละ",
+      ],
+      fallback: [
+        "กูไม่ได้จะปรักปรำนะ แต่ถ้ามองกลางๆ {target} ดูได้ประโยชน์สุดถ้าวงนี้แตกคอกัน",
+        "ลองคิดตามกูดิ {target} รีบปัดประเด็นหนีเร็วเกินไปปะ พวกมึงไม่เอะใจเหรอ?",
+        "กูว่าเราอย่าหลงกลคนเสียงดังเลย หันไปดูคนเนียนๆ อย่าง {target} ดีกว่าว่ะ",
+      ],
+    },
+    M_GAMBLER: {
+      tone: "สายเสี่ยง",
+      day1: [
+        "วันแรกมันต้องวัดดวงเว้ย! กูขอเปิดหน้าท้า {target} เลย กล้าสาบานปะว่าไม่ใช่หมา?",
+        "ไม่รู้แหละ กูเชื่อเซนส์ตัวเอง รอบนี้ {target} มีรังสีอำมหิตแปลกๆ ว่ะ 555",
+        "ใครเงียบกูทุบหมดอ่ะบอกเลย เริ่มจาก {target} ก่อนเป็นไงพวกมึง!",
+      ],
+      fallback: [
+        "กูเทหมดหน้าตักเลยรอบนี้ ถ้า {target} ไม่ใช่หมาป่าให้กูเลี้ยงข้าวเลยเอ้า!",
+        "เอาวะวัดใจกันไปเลย พวกมึงลองจี้ {target} ดูดิ เดี๋ยวก็มีหลุด!",
+        "เซนส์กูมันร้องเตือนดังมากว่า {target} กำลังตอแหลอยู่ชัวร์!",
+      ],
+    },
+    F_DRAMA: {
+      tone: "ดราม่า",
+      day1: [
+        "กรี๊ดดด เปิดเกมมาก็ขนลุกแล้วอ่ะพวกมึง อย่าบอกนะว่า {target} เป็นหมาป่าอ่ะ?!",
+        "เห้ยพวกมึงกูกลัวนะเนี่ย! ทำไม {target} ทำตัวมีพิรุธตั้งแต่วันแรกเลยวะ!",
+        "โอ๊ยยย วงนี้ไว้ใจใครไม่ได้เลยสักคน โดยเฉพาะ {target} หน้าตึงมากมึง!",
+      ],
+      fallback: [
+        "ว้ายยย {target} มึงพูดแบบนี้หมายความว่าไงวะ จะโยนความผิดให้คนอื่นเหรอ?!",
+        "ไม่จริงอ่ะ! กูว่า {target} แม่งโคตรน่าสงสัยเลยพวกมึง อย่าไปหลงเชื่อมันนะ!",
+        "โอ๊ยปวดหัวกับวงนี้มาก {target} มึงเลิกตอแหลแล้วพูดความจริงมาเดี๋ยวนี้!",
+      ],
+    },
+    F_ROASTER: {
+      tone: "ปากแซ่บ",
+      day1: [
+        "แหมมม ตื่นมาก็ทำตัวเนียนเลยนะ {target} อย่าคิดว่ากูดูไม่ออกนะจ๊ะ",
+        "เปิดวันแรกมาก็เงียบเป็นเป่าสากเลยพวกมึง โดยเฉพาะ {target} อมอะไรไว้คายออกมา!",
+        "สภาพแต่ละคนโคตรมีพิรุธ โดยเฉพาะ {target} แกล้งทำเป็นใสซื่อเหรอมึง 555",
+      ],
+      fallback: [
+        "โห {target} แถเก่งขนาดนี้ไปเป็นทนายเถอะมึง ตอแหลไม่เนียนเลยสักนิด!",
+        "หยุดเลย {target} ยิ่งแก้ตัวยิ่งดูเหมือนหมาป่าจนมุมว่ะ พวกมึงดูมันดิ!",
+        "ขำว่ะ {target} คิดว่าพูดแค่นี้แล้วคนในวงจะเชื่อเหรอ ฝันไปเถอะมึง!",
+      ],
+    },
+    F_INNOCENT: {
+      tone: "สายเนียน",
+      day1: [
+        "เห้ยพวกมึง กูเพิ่งตื่นยังงงอยู่เลยอ่ะ {target} มึงว่าใครน่าสงสัยสุดวะ?",
+        "อย่าเพิ่งรุมกูนะเว้ย กูชาวบ้านใสๆ จริงๆ แต่กูแอบกลัว {target} ยังไงไม่รู้อ่ะ",
+        "วันแรกยังเดาไม่ออกเลยอ่ะพวกมึง ลองถาม {target} ดูก่อนมั้ยว่าคิดไง?",
+      ],
+      fallback: [
+        "เดี๋ยวนะ กูงงไปหมดแล้วอ่ะ แต่ทำไม {target} ดูรีบจังเลยวะ กูแอบระแวงนะเนี่ย",
+        "กูไม่ได้อยากหาเรื่องใครนะ แต่เมื่อกี้ {target} พูดแปลกจริงพวกมึง ลองดูดีๆ ดิ",
+        "เห้ยอย่าเพิ่งโหวตมั่วดิ กูว่าลองฟัง {target} อธิบายก่อนมั้ยมันดูลุกลนแปลกๆ",
+      ],
+    },
+    F_OBSERVER: {
+      tone: "จับโป๊ะ",
+      day1: [
+        "กูนั่งดูเงียบๆ อยู่นะ แต่เห็นชัดเลยว่า {target} ดูเกร็งผิดปกติตั้งแต่วันแรก",
+        "ใครพูดน้อยเกินหรือพูดมากเกินกูจดหมดแหละ โดยเฉพาะ {target} ระวังตัวไว้",
+        "เปิดเกมมาแบบนี้จับจังหวะง่ายดีนะ {target} มึงลองพูดอะไรหน่อยดิ เงียบทำไม",
+      ],
+      fallback: [
+        "จับโป๊ะได้จุดนึงละ {target} เปลี่ยนเรื่องไวมากเวลาโดนถามจี้ แบบนี้ไม่ปกติชัวร์",
+        "กูสังเกตมาสองรอบละ {target} ชอบไหลตามน้ำไม่ยอมออกความเห็นเอง หมาป่าชัดๆ",
+        "ดูทรงแล้ว {target} พยายามเบี่ยงเป้าอยู่นะพวกมึง อย่าเพิ่งหลุดโฟกัส",
+      ],
+    },
+    F_INSTIGATOR: {
+      tone: "สายเสี้ยม",
+      day1: [
+        "อุ๊ยยย พวกมึงเห็นปะเมื่อกี้ {target} แอบมองแรงอ่ะ สงสัยกลัวโดนจับได้ปะเนี่ย 555",
+        "เอาจริงนะ กูว่าวงนี้ต้องมีคนแอบแทงข้างหลังแน่ๆ กูเล็ง {target} ไว้ก่อนเลย!",
+        "ลองโยนหินถามทางหน่อยดิ ถ้าวันนี้ลองโหวต {target} จะมีใครรีบออกตัวปกป้องมั้ยน้า~",
+      ],
+      fallback: [
+        "เอ๊ะ ทำไม {target} ดูร้อนตัวจังวะ หรือว่าโดนจี้ถูกจุดเข้าให้แล้วอ่ะพวกมึง 555",
+        "พวกมึงสังเกตปะ เวลาใครแตะ {target} มันรีบเปลี่ยนเรื่องทันทีเลย น่าคิดนะเว้ย!",
+        "กูเชียร์ให้จี้ {target} ต่อเลย ดูซิว่าจะแถไปได้อีกกี่น้ำ!",
+      ],
+    },
+  };
+
+  function pickLocalFallbackLine(params: {
+    bot: any;
+    players: any[];
+    isDay1Opening: boolean;
+    nightVictimNames?: string[];
+    usedTexts: Set<string>;
+  }): { text: string; tone: string } {
+    const { bot, players, isDay1Opening, nightVictimNames, usedTexts } = params;
+    const archKey =
+      bot.archetypeId && LOCAL_FALLBACK_BANK[bot.archetypeId]
+        ? bot.archetypeId
+        : bot.gender === "F"
+        ? "F_ROASTER"
+        : "M_TROLL";
+    const bank = LOCAL_FALLBACK_BANK[archKey] || LOCAL_FALLBACK_BANK.M_TROLL;
+    const pool = isDay1Opening ? bank.day1 : bank.fallback;
+
+    const othersAlive = players.filter((p: any) => p.alive && p.id !== bot.id);
+    const randomTarget =
+      othersAlive.length > 0
+        ? formatThaiCall(othersAlive[Math.floor(Math.random() * othersAlive.length)])
+        : "พวกมึง";
+
+    const candidates = pool
+      .map((tpl) => tpl.replace(/\{target\}/g, randomTarget))
+      .filter((txt) => !usedTexts.has(txt));
+
+    let chosen =
+      candidates.length > 0
+        ? candidates[Math.floor(Math.random() * candidates.length)]
+        : pool[Math.floor(Math.random() * pool.length)].replace(/\{target\}/g, randomTarget);
+
+    if (isDay1Opening && Array.isArray(nightVictimNames) && nightVictimNames.length > 0 && Math.random() < 0.45) {
+      const deadShort = nightVictimNames[0].replace(/\s*\(.*\)$/, "");
+      chosen = `เชี่ย ${deadShort} ปลิวตั้งแต่คืนแรกเลยเหรอวะ! ${chosen}`;
+    }
+
+    usedTexts.add(chosen);
+    return { text: chosen, tone: bank.tone };
+  }
+
+  // Ultra-Compact Prompt (~500 tokens max per single-bot API call)
+  function buildUltraCompactBotPrompt(params: {
+    bot: any;
+    dayNumber: number;
+    players: any[];
+    seerKnowledge: any[];
+    bodyguardKnowledge: any[];
+    wolfKillHistory: any[];
+    recentTranscript: string[];
+    nightVictimNames?: string[];
+    humanMessage?: string;
+    speakerName?: string;
+    mode: string;
+  }): { systemPrompt: string; userPrompt: string } {
+    const {
+      bot,
+      dayNumber,
+      players,
+      seerKnowledge,
+      bodyguardKnowledge,
+      recentTranscript,
+      nightVictimNames,
+      humanMessage,
+      speakerName,
+      mode,
+    } = params;
+
+    const aliveNames = players
+      .filter((p: any) => p.alive)
+      .map((p: any) => formatThaiCall(p))
+      .join(",");
+    // Strictly NO roles of dead players!
+    const deadNamesOnly =
+      players
+        .filter((p: any) => !p.alive)
+        .map((p: any) => p.shortName || p.name)
+        .join(",") || "ไม่มี";
+    const revealedBeggarName =
+      players
+        .filter((p: any) => p.revealedBeggar)
+        .map((p: any) => p.shortName || p.name)
+        .join(",") || "ไม่มี";
+
+    const tableStatusLine = `วันที่:${dayNumber} | รอด:${aliveNames} | ตาย:${deadNamesOnly} | เปิดการ์ดยาจก:${revealedBeggarName}`;
+
+    // Private skill intel ONLY for this specific bot (1 concise line)
+    let privateIntel = "ไม่มีข้อมูลลับเพิ่ม";
+    if (isWolfRole(bot.role)) {
+      const partners = players
+        .filter((p: any) => p.id !== bot.id && isWolfRole(p.role))
+        .map((p: any) => `${formatThaiCall(p)}(${p.alive ? "รอด" : "ตาย"})`)
+        .join(",");
+      privateIntel = `ฝูงหมาป่า:${partners || "เหลือมึงตัวเดียว"} ห้ามแฉพวกเดียวกัน ให้เนียนป้ายสีชาวบ้าน`;
+    } else if (bot.role === "SEER") {
+      const checks = (seerKnowledge || [])
+        .slice(-3)
+        .map((k: any) => `${k.targetName}=${k.isWerewolf ? "หมาป่า!" : "คนดี"}`)
+        .join(", ");
+      privateIntel = checks ? `ผลส่องหมอดู:${checks} (เลือกซ่อนตัวหรือแฉเองได้)` : "ยังไม่มีผลส่อง";
+    } else if (bot.role === "BODYGUARD") {
+      const saves = (bodyguardKnowledge || [])
+        .slice(-3)
+        .map((k: any) => `คืน${k.night}:${k.targetName}${k.savedAttack ? "(เซฟติด!)" : ""}`)
+        .join(", ");
+      privateIntel = saves ? `ประวัติการ์ด:${saves}` : "ยังไม่เคยเซฟใคร";
+    }
+
+    const botGender = bot.gender === "F" ? "หญิง" : "ชาย";
+    const botRoleThai = ROLE_THAI_SHORT[bot.role] || "ชาวบ้าน";
+    const botPersona = `${bot.archetypeName || bot.personaLabel || "เพื่อนซี้"} (${(bot.personaTrait || "").slice(0, 60)})`;
+
+    const botProfileBlock =
+      `ตัวมึง:${formatThaiCall(bot)}(${botGender}) | บทลับ:${botRoleThai} | นิสัย:${botPersona}\n` +
+      `ข้อมูลลับเฉพาะมึง:${privateIntel}`;
+
+    // Strictly last 8-10 messages only!
+    const compactHistory = (recentTranscript || [])
+      .slice(-10)
+      .map((line) => String(line).slice(0, 140))
+      .join("\n");
+
+    const systemPrompt =
+      `มึงคือผู้เล่นเกม Werewolf ในแชทกลุ่มเพื่อนซี้คนไทย สวมบทเป็น ${formatThaiCall(bot)} เท่านั้น\n` +
+      `กฎเหล็ก: ตอบภาษาเพื่อนสนิทดิบๆ กู-มึง ไอ้/อี แซวแรง ปั่นประสาท ห้ามมีคำสุภาพ(ครับ/ค่ะ/คุณ/ผม/ฉัน)เด็ดขาด! ` +
+      `พิมพ์แค่คำพูดของมึงสั้นๆ 1-2 ประโยค ห้ามใส่ชื่อนำหน้า ห้ามใส่เครื่องหมายคำพูด`;
+
+    let triggerNote = "เปิดวงถกเถียงต่อจากแชทล่าสุดให้ตรงนิสัยมึง";
+    if (mode === "REPLY_TO_HUMAN" && humanMessage) {
+      triggerNote = `ล่าสุด ${speakerName || "เพื่อน"} พิมพ์ว่า "${String(humanMessage).slice(0, 120)}" ให้มึงโต้ตอบหรือสวนกลับตามนิสัย`;
+    } else if (mode === "INITIAL_DAY") {
+      triggerNote =
+        nightVictimNames && nightVictimNames.length > 0
+          ? `เมื่อคืน ${nightVictimNames.join(",")} โดนหมาป่าฆ่า! ออกความเห็นสั้นๆ`
+          : "เมื่อคืนไม่มีใครตาย (บอดี้การ์ดเซฟได้)! ออกความเห็นสั้นๆ";
+    }
+
+    const userPrompt =
+      `${tableStatusLine}\n` +
+      `${botProfileBlock}\n` +
+      `แชทล่าสุด:\n${compactHistory || "(เพิ่งเปิดวง)"}\n` +
+      `คำสั่ง:${triggerNote} (ตอบสั้น 1-2 ประโยคภาษา กู-มึง เท่านั้น)`;
+
+    return { systemPrompt, userPrompt };
+  }
+
+  function sanitizeSingleBotReply(raw: string, bot: any): string {
+    let cleaned = String(raw || "").trim();
+    // Strip markdown code fences or JSON wrappers if a model accidentally wraps it
+    cleaned = cleaned.replace(/^```[\s\S]*?\n|```$/g, "").trim();
+    if (cleaned.startsWith("{") && cleaned.endsWith("}")) {
+      try {
+        const parsed = JSON.parse(cleaned);
+        if (typeof parsed.text === "string") cleaned = parsed.text;
+        else if (typeof parsed.message === "string") cleaned = parsed.message;
+      } catch {
+        // Keep raw text
+      }
+    }
+    // Strip leading speaker name prefix like "ไอ้บอส: ..." or "บอส:"
+    const shortName = String(bot?.shortName || bot?.name || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    if (shortName) {
+      cleaned = cleaned.replace(new RegExp(`^(?:ไอ้|อี)?${shortName}\\s*[:：-]\\s*`, "i"), "");
+    }
+    cleaned = cleaned.replace(/^["'「『]+|["'」』]+$/g, "").replace(/\s+/g, " ").trim();
+    // Keep strictly concise (1-2 sentences / max ~220 Thai chars)
+    if (cleaned.length > 220) {
+      cleaned = `${cleaned.slice(0, 217).trim()}...`;
+    }
+    return cleaned;
+  }
+
+  // Single-Bot AI Caller:
+  // 1) Groq (GROQ_MODEL, 8s timeout, max_tokens: 100)
+  // 2) Failover immediately to Gemini (GEMINI_MODEL_PRIMARY) on timeout / 429 / error
+  // 3) Failover to LOCAL_FALLBACK_BANK if both APIs fail
+  async function callBotSingleReplyAI(params: {
+    bot: any;
+    systemPrompt: string;
+    userPrompt: string;
+    players: any[];
+    usedTexts: Set<string>;
+  }): Promise<{ text: string; tone: string; modelUsed: string }> {
+    const { bot, systemPrompt, userPrompt, players, usedTexts } = params;
+    const defaultTone =
+      LOCAL_FALLBACK_BANK[bot.archetypeId]?.tone ||
+      (bot.personaLabel ? String(bot.personaLabel).slice(0, 14) : "ถกเถียง");
+
+    // --- Step 1: Try GROQ_MODEL first (strict 8,000ms timeout & max_tokens: 100) ---
+    const groqApiKey = (process.env.GROQ_API_KEY || "").trim();
+    if (isValidKey(groqApiKey)) {
+      const envGroqModel = (process.env.GROQ_MODEL || "").trim();
+      const discovered = await discoverGroqChatModels(groqApiKey);
+      let groqCandidates: string[] = [];
+      if (discovered.length > 0) {
+        groqCandidates =
+          envGroqModel && discovered.includes(envGroqModel)
+            ? [envGroqModel, ...discovered.filter((m) => m !== envGroqModel)]
+            : discovered;
+      } else {
+        groqCandidates = Array.from(
+          new Set([envGroqModel, ...GROQ_FALLBACK_MODELS].filter(Boolean))
+        );
+      }
+      const now = Date.now();
+      const activeGroq = groqCandidates.filter(
+        (m) => (groqModelCooldownUntil.get(m) || 0) <= now
+      );
+      // Try top 1-2 Groq models with strict 8s timeout total so failover to Gemini is instant
+      for (const model of (activeGroq.length > 0 ? activeGroq : groqCandidates).slice(0, 2)) {
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), 8000);
+        try {
+          const res = await fetch("https://api.groq.com/openai/v1/chat/completions", {
+            method: "POST",
+            signal: controller.signal,
+            headers: {
+              "Content-Type": "application/json",
+              Authorization: `Bearer ${groqApiKey}`,
+            },
+            body: JSON.stringify({
+              model,
+              temperature: 0.85,
+              max_tokens: 100,
+              messages: [
+                { role: "system", content: systemPrompt },
+                { role: "user", content: userPrompt },
+              ],
+            }),
+          });
+          if (!res.ok) {
+            const errBody = await res.text().catch(() => "");
+            if (res.status === 404 || errBody.toLowerCase().includes("model_not_found")) {
+              groqModelCooldownUntil.set(model, Date.now() + 15 * 60 * 1000);
+              continue; // try next discovered Groq model if 404
+            }
+            if (res.status === 429) {
+              groqModelCooldownUntil.set(model, Date.now() + 60 * 1000);
+              console.warn(`[BotQueue] Groq ${model} 429 Rate Limit -> Failover to Gemini`);
+              break; // immediate failover to Gemini on 429
+            }
+            console.warn(`[BotQueue] Groq ${model} HTTP ${res.status} -> Failover to Gemini`);
+            break;
+          }
+          const json: any = await res.json();
+          const rawText = json?.choices?.[0]?.message?.content || "";
+          const cleaned = sanitizeSingleBotReply(rawText, bot);
+          if (cleaned) {
+            groqModelCooldownUntil.delete(model);
+            usedTexts.add(cleaned);
+            return { text: cleaned, tone: defaultTone, modelUsed: `groq:${model}` };
+          }
+        } catch (err: any) {
+          console.warn(
+            `[BotQueue] Groq ${model} failed/timeout (>8s): ${String(err?.message || err).slice(0, 120)} -> Failover to Gemini`
+          );
+          break; // immediate failover to Gemini on timeout/network error
+        } finally {
+          clearTimeout(timer);
+        }
+      }
+    }
+
+    // --- Step 2: Failover to GEMINI_MODEL_PRIMARY ---
+    const geminiCfg = getGeminiConfig();
+    if (geminiCfg) {
+      try {
+        const ai = new GoogleGenAI({
+          apiKey: geminiCfg.apiKey,
+          httpOptions: { headers: { "User-Agent": "aistudio-build" } },
+        });
+        const baseList = Array.from(
+          new Set(
+            [
+              geminiCfg.primaryModel,
+              geminiCfg.fastModel,
+              "gemini-4-hydrogen",
+              "gemini-3.1-flash-lite",
+            ].filter(Boolean)
+          )
+        );
+        const now = Date.now();
+        let candidates = baseList.filter((m) => (geminiModelCooldownUntil.get(m) || 0) <= now);
+        if (candidates.length === 0) {
+          const discovered = await discoverGeminiActiveModels(geminiCfg.apiKey);
+          candidates = discovered.filter((m) => (geminiModelCooldownUntil.get(m) || 0) <= now);
+        }
+
+        for (const modelName of (candidates.length > 0 ? candidates : baseList).slice(0, 2)) {
+          try {
+            const isGemini4 = modelName.toLowerCase().startsWith("gemini-4-");
+            const config: any = {
+              systemInstruction: systemPrompt,
+              safetySettings: WEREWOLF_SAFETY_SETTINGS,
+            };
+            if (isGemini4) {
+              config.thinkingConfig = { thinkingLevel: ThinkingLevel.LOW };
+            } else {
+              config.temperature = 0.85;
+              config.maxOutputTokens = 120;
+            }
+            const response = await withTimeout(
+              ai.models.generateContent({
+                model: modelName,
+                contents: userPrompt,
+                config,
+              }),
+              9000,
+              `gemini:${modelName}`
+            );
+            const rawText =
+              response.text ||
+              response.candidates?.[0]?.content?.parts?.map((p: any) => p.text || "").join("") ||
+              "";
+            const cleaned = sanitizeSingleBotReply(rawText, bot);
+            if (cleaned) {
+              geminiModelCooldownUntil.delete(modelName);
+              usedTexts.add(cleaned);
+              return { text: cleaned, tone: defaultTone, modelUsed: `gemini:${modelName}` };
+            }
+          } catch (gErr: any) {
+            const gMsg = String(gErr?.message || gErr).toLowerCase();
+            if (gMsg.includes("404") || gMsg.includes("not found")) {
+              geminiModelCooldownUntil.set(modelName, Date.now() + 15 * 60 * 1000);
+            } else if (gMsg.includes("429") || gMsg.includes("quota") || gMsg.includes("timed out")) {
+              geminiModelCooldownUntil.set(modelName, Date.now() + 45 * 1000);
+            }
+            console.warn(`[BotQueue] Gemini ${modelName} failed: ${String(gErr?.message || gErr).slice(0, 140)}`);
+          }
+        }
+      } catch (err: any) {
+        console.warn(`[BotQueue] Gemini failover error: ${String(err?.message || err).slice(0, 140)}`);
+      }
+    }
+
+    // --- Step 3: Local Fallback Bank (never freezes the game!) ---
+    const local = pickLocalFallbackLine({
+      bot,
+      players,
+      isDay1Opening: false,
+      usedTexts,
+    });
+    return { text: local.text, tone: local.tone, modelUsed: "local:fallback_bank" };
+  }
+
+  // Pick 3-5 living AI bots, prioritizing bots whose nickname was mentioned in recent chat
+  function selectBotsForDiscussionQueue(params: {
+    aliveAI: any[];
+    recentTranscript: string[];
+    humanMessage?: string;
+    mode: string;
+  }): any[] {
+    const { aliveAI, recentTranscript, humanMessage, mode } = params;
+    if (aliveAI.length === 0) return [];
+
+    // 3 to 5 bots per round to stay well below 12 RPM
+    const desiredCount =
+      mode === "INITIAL_DAY"
+        ? Math.min(aliveAI.length, 3 + Math.floor(Math.random() * 3)) // 3..5 bots
+        : Math.min(aliveAI.length, 3 + Math.floor(Math.random() * 2)); // 3..4 bots
+
+    const latestFocusText = [
+      humanMessage || "",
+      ...(recentTranscript || []).slice(-3),
+    ]
+      .join(" ")
+      .toLowerCase();
+
+    const mentioned: any[] = [];
+    const others: any[] = [];
+    for (const bot of aliveAI) {
+      const nick = String(bot.shortName || bot.name || "")
+        .replace(/^(ไอ้|อี)/, "")
+        .trim()
+        .toLowerCase();
+      if (nick && latestFocusText.includes(nick)) {
+        mentioned.push(bot);
+      } else {
+        others.push(bot);
+      }
+    }
+
+    const shuffle = <T,>(arr: T[]): T[] => {
+      const copy = [...arr];
+      for (let i = copy.length - 1; i > 0; i--) {
+        const j = Math.floor(Math.random() * (i + 1));
+        [copy[i], copy[j]] = [copy[j], copy[i]];
+      }
+      return copy;
+    };
+
+    return [...shuffle(mentioned), ...shuffle(others)].slice(0, desiredCount);
+  }
+
+  // Sequential Queue Loop: strictly 1 bot at a time with 4,000 - 5,000 ms delay & live BOT_TYPING
+  async function runBotChatLoop(params: {
+    room: RoomState | null;
+    loopId: number;
+    dayNumber: number;
+    players: any[];
+    aliveAI: any[];
+    nightVictimNames?: string[];
+    seerKnowledge: any[];
+    bodyguardKnowledge: any[];
+    wolfKillHistory: any[];
+    recentTranscript: string[];
+    humanMessage?: string;
+    speakerName?: string;
+    mode: string;
+    streamOverWs: boolean;
+  }): Promise<any[]> {
+    const {
+      room,
+      loopId,
+      dayNumber,
+      players,
+      aliveAI,
+      nightVictimNames,
+      seerKnowledge,
+      bodyguardKnowledge,
+      wolfKillHistory,
+      humanMessage,
+      speakerName,
+      mode,
+      streamOverWs,
+    } = params;
+
+    const selectedBots = selectBotsForDiscussionQueue({
+      aliveAI,
+      recentTranscript: params.recentTranscript,
+      humanMessage,
+      mode,
+    });
+
+    const isLoopCancelled = (): boolean => {
+      if (!room) return false;
+      if (room.activeBotLoopId !== loopId) return true;
+      if (!room.gameStarted) return true;
+      const curPhase = room.gameSnapshot?.phase;
+      if (curPhase && curPhase !== "DAY_DISCUSSION" && curPhase !== "DAY_RESULT") {
+        return true;
+      }
+      return false;
+    };
+
+    const isHybridDay1Opening = Number(dayNumber) === 1 && mode === "INITIAL_DAY";
+    const rollingTranscript = [...(params.recentTranscript || [])].slice(-10);
+    const usedTexts = new Set<string>();
+    const emittedMessages: any[] = [];
+
+    try {
+      for (let idx = 0; idx < selectedBots.length; idx++) {
+        if (isLoopCancelled()) break;
+
+        const bot = selectedBots[idx];
+        const botDisplayName = formatThaiCall(bot);
+
+        // Emit LINE Typing Indicator before generating/waiting
+        if (streamOverWs && room) {
+          broadcastToRoom(room.roomId, {
+            type: "BOT_TYPING",
+            botId: bot.id,
+            name: botDisplayName,
+            gender: bot.gender,
+            isTyping: true,
+            loopId,
+          });
+        }
+
+        let reply: { text: string; tone: string; modelUsed: string };
+
+        if (isHybridDay1Opening) {
+          // Day 1 Opening = 0 Token from LOCAL_FALLBACK_BANK, still paced with realistic typing feel
+          if (streamOverWs) {
+            await sleepMs(1200 + Math.floor(Math.random() * 800));
+            if (isLoopCancelled()) break;
+          }
+          const localLine = pickLocalFallbackLine({
+            bot,
+            players,
+            isDay1Opening: true,
+            nightVictimNames,
+            usedTexts,
+          });
+          reply = { ...localLine, modelUsed: "local:day1_hybrid_0token" };
+        } else {
+          // Refresh rolling transcript from authoritative room snapshot if humans typed mid-loop
+          if (room?.gameSnapshot && Array.isArray(room.gameSnapshot.messages)) {
+            const latestPublic = room.gameSnapshot.messages
+              .filter((m: any) => !m.isSecret && m.senderId !== "secret")
+              .slice(-10)
+              .map((m: any) => `${m.senderName}: ${m.text}`);
+            if (latestPublic.length > 0) {
+              rollingTranscript.length = 0;
+              rollingTranscript.push(...latestPublic);
+            }
+          }
+
+          const { systemPrompt, userPrompt } = buildUltraCompactBotPrompt({
+            bot,
+            dayNumber,
+            players,
+            seerKnowledge,
+            bodyguardKnowledge,
+            wolfKillHistory,
+            recentTranscript: rollingTranscript.slice(-10),
+            nightVictimNames,
+            humanMessage,
+            speakerName,
+            mode,
+          });
+
+          reply = await callBotSingleReplyAI({
+            bot,
+            systemPrompt,
+            userPrompt,
+            players,
+            usedTexts,
+          });
+        }
+
+        if (isLoopCancelled()) break;
+
+        const phaseLabel =
+          mode === "REPLY_TO_HUMAN"
+            ? `วันที่ ${dayNumber} · โต้ตอบ`
+            : mode === "CONTINUE_DEBATE"
+            ? `วันที่ ${dayNumber} · วิเคราะห์ต่อ`
+            : `วันที่ ${dayNumber} · ถกเถียง`;
+
+        const chatMessage = {
+          id: `bot-${dayNumber}-${loopId}-${idx}-${Date.now()}`,
+          senderId: bot.id,
+          senderName: bot.name,
+          senderGender: bot.gender,
+          senderPersona: bot.personaLabel,
+          text: reply.text,
+          tone: reply.tone,
+          phaseLabel,
+          timestamp: formatChatClock(),
+        };
+
+        emittedMessages.push({
+          speakerId: bot.id,
+          speakerName: bot.name,
+          text: reply.text,
+          tone: reply.tone,
+          modelUsed: reply.modelUsed,
+        });
+
+        rollingTranscript.push(`${bot.name}: ${reply.text}`);
+        if (rollingTranscript.length > 10) {
+          rollingTranscript.splice(0, rollingTranscript.length - 10);
+        }
+
+        // Persist into authoritative room snapshot & broadcast immediately to LINE Group Chat
+        if (streamOverWs && room) {
+          if (room.gameSnapshot && Array.isArray(room.gameSnapshot.messages)) {
+            if (!room.gameSnapshot.messages.some((m: any) => m.id === chatMessage.id)) {
+              room.gameSnapshot.messages = [...room.gameSnapshot.messages, chatMessage];
+            }
+          }
+          broadcastToRoom(room.roomId, {
+            type: "BOT_CHAT_MESSAGE",
+            chatMessage,
+            modelUsed: reply.modelUsed,
+            loopId,
+          });
+          broadcastToRoom(room.roomId, {
+            type: "BOT_TYPING",
+            botId: null,
+            name: null,
+            isTyping: false,
+            loopId,
+          });
+        }
+
+        // Strict sequential pacing: sleep random 4,000 - 5,000 ms BEFORE calling the next bot!
+        if (idx < selectedBots.length - 1) {
+          const delayMs = randomBotDelayMs();
+          // Sleep in 250ms slices so Ready/Phase-change aborts instantaneously without waiting 5s
+          let elapsed = 0;
+          while (elapsed < delayMs) {
+            if (isLoopCancelled()) break;
+            const step = Math.min(250, delayMs - elapsed);
+            await sleepMs(step);
+            elapsed += step;
+          }
+          if (isLoopCancelled()) break;
+        }
+      }
+    } finally {
+      if (streamOverWs && room && room.activeBotLoopId === loopId) {
+        broadcastToRoom(room.roomId, {
+          type: "BOT_TYPING",
+          botId: null,
+          name: null,
+          isTyping: false,
+          loopId,
+        });
+        broadcastToRoom(room.roomId, {
+          type: "BOT_QUEUE_DONE",
+          loopId,
+        });
+      }
+    }
+
+    return emittedMessages;
+  }
+
+  // Endpoint 1: Sequential Rate-Limit-Safe Thai Day Discussion (3-5 Bots, 4-5s Delay, Hybrid Day 1)
   app.post("/api/werewolf/discuss", async (req, res) => {
     try {
       const {
@@ -1834,17 +2636,16 @@ async function startServer() {
         seerKnowledge: reqSeerKnowledge,
         bodyguardKnowledge: reqBgKnowledge,
         wolfKillHistory: reqWolfHistory,
-        voteHistory: reqVoteHistory,
-        doubleKillNextNight,
         recentTranscript,
-        previousVotes,
         humanMessage,
         speakerName,
         mode, // 'INITIAL_DAY' | 'REPLY_TO_HUMAN' | 'CONTINUE_DEBATE'
       } = req.body;
 
-      const authSnap =
-        roomId && rooms.get(String(roomId).trim().toUpperCase())?.gameSnapshot;
+      const normalizedRoomId = roomId ? String(roomId).trim().toUpperCase() : "";
+      const room = normalizedRoomId ? rooms.get(normalizedRoomId) || null : null;
+      const authSnap = room?.gameSnapshot;
+
       const players = Array.isArray(authSnap?.players)
         ? authSnap.players
         : reqPlayers || [];
@@ -1857,145 +2658,71 @@ async function startServer() {
       const wolfKillHistory = Array.isArray(authSnap?.wolfKillHistory)
         ? authSnap.wolfKillHistory
         : reqWolfHistory || [];
-      const voteHistory = Array.isArray(authSnap?.voteHistory)
-        ? authSnap.voteHistory
-        : reqVoteHistory || [];
 
       const aliveAI = players.filter((p: any) => p.alive && !p.isHuman);
       if (aliveAI.length === 0) {
         return res.json({ ok: true, data: { messages: [] }, aliveAIIds: [] });
       }
 
-      const totalCount = players.length || 10;
-      const aliveAll = players.filter((p: any) => p.alive);
-      const deadAll = players.filter((p: any) => !p.alive);
+      const safeTranscript = Array.isArray(recentTranscript)
+        ? recentTranscript.slice(-10)
+        : [];
+      const hasLiveWsClients =
+        Boolean(room) && getLiveOnlineIds(normalizedRoomId).size > 0;
 
-      const aliveDescriptions = aliveAll.map(formatPlayerProfileLine).join("\n");
-      const deadDescriptions =
-        deadAll.length > 0
-          ? deadAll.map(formatDeadPlayerLine).join("\n")
-          : "ยังไม่มีผู้เสียชีวิต";
-      const voteHistoryText = formatVoteHistoryBlock(voteHistory, previousVotes);
+      if (room && hasLiveWsClients) {
+        // Cancel any previous unfinished bot loop in this room and launch fresh sequential queue
+        room.activeBotLoopId += 1;
+        const loopId = room.activeBotLoopId;
 
-      const wolvesNames = players
-        .filter((p: any) => isWolfRole(p.role))
-        .map((p: any) => `${p.name} (${p.role}, ${p.alive ? "ยังมีชีวิต" : "ตายแล้ว"})`)
-        .join(" และ ");
+        void runBotChatLoop({
+          room,
+          loopId,
+          dayNumber: Number(dayNumber) || 1,
+          players,
+          aliveAI,
+          nightVictimNames: Array.isArray(nightVictimNames) ? nightVictimNames : [],
+          seerKnowledge,
+          bodyguardKnowledge,
+          wolfKillHistory,
+          recentTranscript: safeTranscript,
+          humanMessage,
+          speakerName,
+          mode: mode || "INITIAL_DAY",
+          streamOverWs: true,
+        }).catch((err) => {
+          console.error("[BotQueue] Sequential loop error:", err?.message || err);
+        });
 
-      const aiIdsList = aliveAI
-        .map((a: any) => `${a.name} [${a.id} · ${a.gender === "M" ? "ชาย" : "หญิง"} · ${a.personaLabel}]`)
-        .join(", ");
-
-      const systemPrompt = `คุณคือสมองอิสระของบอท AI แต่ละตัวในแก๊งเพื่อนสนิทคนไทยที่คบกันมา 10 ปี กำลังนั่งล้อมวงเล่นบอร์ดเกม Ultimate Werewolf (${totalCount} คน, ตอนนี้รอดชีวิต ${aliveAll.length} คน)
-
-กฎเหล็ก 100% — คิดสดเองตามสถานการณ์จริง ห้ามพูดซ้ำซาก ห้ามใช้แพตเทิร์นสำเร็จรูป:
-1. **บุคลิกและเพศเฉพาะตัว (ต้องสวมบทบาทเป๊ะทุกตัว!)**:
-   - บอทแต่ละตัวมี "เพศ (ชาย/หญิง)" และ "นิสัยเฉพาะตัว (Archetype)" ที่กำหนดไว้ในข้อมูลด้านล่าง จงให้บอทคิด วิเคราะห์ ตอบโต้ โกหก และใช้จังหวะคำพูดให้ตรงกับนิสัยและเพศของตัวเอง 100%
-   - เรียกเพื่อนผู้ชายว่า "ไอ้[ชื่อ]" และเรียกเพื่อนผู้หญิงว่า "อี[ชื่อ]" หรือ "[ชื่อ]" ให้ตรงเพศจริงๆ ในวงเพื่อนสนิท
-2. **ภาษาเพื่อนซี้ดิบๆ ฮาๆ (ห้ามมีคำสุภาพแม้แต่คำเดียว!)**:
-   - ใช้เฉพาะ "กู", "มึง", "พวกมึง", "ไอ้...", "อี..." และสแลงวงเหล้า/วงดิสคอร์ด เช่น "เชี่ย", "สัส", "แม่ง", "ตอแหล", "เหลี่ยม", "เนียนเหี้ยๆ", "โง่ชิบหาย", "ควายเอ๊ย", "5555" (จิกกัดฮาๆ แข่งกันมันส์ๆ ไม่ใช่เกลียดชังจริง)
-   - **ห้ามเด็ดขาด**: ห้ามมีคำว่า "ครับ", "ค่ะ", "นะครับ", "นะคะ", "คุณ", "ผม", "ฉัน", "ดิฉัน", "ท่าน"
-   - พิมพ์สั้น กระชับ เป็นธรรมชาติเหมือนแชทกลุ่มจริง (คนละ 1-3 ประโยคสั้นๆ ไม่ใช่เรียงความ)
-3. **การวางแผนอิสระตามบทบาทลับ (ห้ามโกงข้อมูลนอกบทบาท!)**:
-   - **WEREWOLF / WOLF_CUB / HUMAN_WOLF** [ฝูงหมาป่าคือ: ${wolvesNames} | ประวัติการล่า: ${JSON.stringify(wolfKillHistory)}]: รู้จักกันเอง คิดแผนเนียนๆ เองได้อิสระ — โกหกป้ายสีชาวบ้าน, แอบช่วยเพื่อนหมาป่าแบบไม่ให้โจ่งแจ้ง, หรือถ้าจนมุมสามารถ "แกล้งเคลมเป็นหมอดู/บอดี้การ์ด" เพื่อปั่นวงได้! (พิเศษ: HUMAN_WOLF รู้ว่าหมอดูส่องตัวเองจะเห็นเป็นชาวบ้าน จึงกล้าท้าให้หมอดูส่อง!)
-   - **SEER (เทพพยากรณ์)**: รู้เฉพาะผลส่องของตัวเอง (${JSON.stringify(seerKnowledge)}) — ตัดสินใจเองอย่างฉลาดว่าจะซ่อนตัวก่อนหรือเปิดการ์ดแฉตอนไหนเพื่อช่วยหมู่บ้าน! ห้ามโกงรู้ว่า HUMAN_WOLF เป็นหมาป่าถ้าผลส่องเป็น false
-   - **BODYGUARD (บอดี้การ์ด)**: รู้เฉพาะประวัติการคุ้มกันของตัวเอง (${JSON.stringify(bodyguardKnowledge)}) — ตัดสินใจเองว่าจะเก็บตัวเงียบหรือใบ้/เปิดเผยเพื่อช่วยคนที่ตัวเองเซฟไว้
-   - **BEGGAR (ยาจก/คนงี่เง่า)**: สามารถแกล้งพูดกวนๆ หรือล่อเป้าให้คนสงสัยแบบเนียนๆ (แต่อย่าเฉลยตรงๆ ว่าตัวเองเป็นยาจก)
-   - **VILLAGER (ชาวบ้าน)**: ไม่รู้บทบาทใคร วิเคราะห์สดจากคำพูด พิรุธ เหตุการณ์ตาย และประวัติการโหวตจริง
-4. **บทสนทนาโต้ตอบกันเองแบบมีชีวิต (Multi-Bot Back-and-Forth)**:
-   - สร้างคำพูดเฉพาะจากบอท AI ที่ยังมีชีวิตอยู่เท่านั้น (${aiIdsList}) — ห้ามสร้างคำพูดแทนผู้เล่นคนจริงเด็ดขาด
-   - ให้บอทโต้ตอบกันเองเป็นลำดับต่อกันจริง! เช่น บอทคนที่ 2 เถียง/สวนกลับ/เห็นด้วยกับสิ่งที่บอทคนที่ 1 หรือผู้เล่นคนจริงเพิ่งพิมพ์ไปสดๆ ร้อนๆ และถ้าบอทตัวไหนถูกพาดพิงหรือถูกกล่าวหาในแชท ให้บอทตัวนั้นรีบโผล่มาแก้ตัวหรือด่าสวนตามนิสัยของมันทันที!`;
-
-      const humanDisplayName = speakerName || "ผู้เล่น";
-      const targetMsgCount = Math.min(aliveAI.length, mode === "INITIAL_DAY" ? 5 : 4);
-      const minMsgCount = Math.min(aliveAI.length, mode === "INITIAL_DAY" ? 3 : 2);
-
-      let userPrompt = "";
-      if (mode === "REPLY_TO_HUMAN") {
-        userPrompt = `=== กลางวันวันที่ ${dayNumber} (โต้ตอบคำพูดล่าสุดของผู้เล่นคนจริง + เถียงกันต่อ) ===
-ผู้เล่นที่ยังมีชีวิต (${aliveAll.length} คน):
-${aliveDescriptions}
-
-ผู้เสียชีวิตแล้ว:
-${deadDescriptions}
-
-ประวัติการโหวตที่ผ่านมา:
-${voteHistoryText}
-
-แชทล่าสุดในห้อง (15 ข้อความล่าสุด):
-${(recentTranscript || []).slice(-15).join("\n")}
-
-🔥 ล่าสุด "${humanDisplayName}" เพิ่งพิมพ์ในแชทว่า: "${humanMessage}"
-
-ให้บอท AI ${minMsgCount}-${targetMsgCount} ตัว (เลือกตัวที่ถูกพาดพิงก่อน + ตัวที่มีนิสัยชอบสวน/วิเคราะห์) โต้ตอบคำพูดของ "${humanDisplayName}" และโต้เถียงต่อยอดกันเองตามบทบาทลับและนิสัยเฉพาะตัวของแต่ละคน (1-3 ประโยคสั้นๆ ดิบๆ ฮาๆ ภาษา กู-มึง ห้ามมีคำสุภาพ!)`;
-      } else if (mode === "CONTINUE_DEBATE") {
-        userPrompt = `=== กลางวันวันที่ ${dayNumber} (ถกเถียงเดือดต่อเนื่องก่อนลงคะแนนโหวต) ===
-ผู้เล่นที่ยังมีชีวิต (${aliveAll.length} คน):
-${aliveDescriptions}
-
-ผู้เสียชีวิตแล้ว:
-${deadDescriptions}
-
-ประวัติการโหวตที่ผ่านมา:
-${voteHistoryText}
-
-แชทล่าสุดในห้อง (15 ข้อความล่าสุด):
-${(recentTranscript || []).slice(-15).join("\n")}
-
-ให้บอท AI ${minMsgCount}-${targetMsgCount} ตัว เถียงกันต่อ จี้พิรุธจากแชทล่าสุด แก้ตัวถ้าโดนพาดพิง หรือจับโป๊ะจากประวัติโหวต โดยให้บอทตัวหลังโต้ตอบคำพูดบอทตัวก่อนหน้าด้วย (1-3 ประโยคสั้นๆ ตรงนิสัยและเพศของแต่ละตัว ภาษา กู-มึง ล้วนๆ!)`;
-      } else {
-        userPrompt = `=== เช้าวันที่ ${dayNumber} (เพิ่งตื่นจากกลางคืน) ===
-เหตุการณ์เมื่อคืน: ${
-          nightVictimNames && nightVictimNames.length > 0
-            ? `${nightVictimNames.join(" และ ")} โดนหมาป่าฆ่าตายเมื่อคืนนี้!${doubleKillNextNight ? " (ลูกหมาป่าตายด้วย คืนหน้าหมาป่าจะฆ่าได้ 2 ศพ!)" : ""}`
-            : "เมื่อคืนสงบสุข ไม่มีใครตายเลย! (บอดี้การ์ดเซฟถูกคน)"
-        }
-
-ผู้เล่นที่ยังมีชีวิต (${aliveAll.length} คน):
-${aliveDescriptions}
-
-ผู้เสียชีวิตแล้ว:
-${deadDescriptions}
-
-ประวัติการโหวตที่ผ่านมา:
-${voteHistoryText}
-
-แชทล่าสุดก่อนหน้า:
-${(recentTranscript || []).slice(-15).join("\n") || "(เพิ่งเริ่มวันแรก)"}
-
-ให้บอท AI ${minMsgCount}-${targetMsgCount} ตัว เปิดวงคุยกันสดๆ หลังรู้ข่าวเมื่อคืน โดยให้แต่ละตัวแสดงปฏิกิริยา คิดวิเคราะห์ โยนขี้ ปั่นวง หรือโต้เถียงสวนกันไปมาตามเพศ นิสัยเฉพาะตัว และบทบาทลับของตัวเอง (1-3 ประโยคสั้นๆ ภาษา กู-มึง ล้วนๆ ห้ามมีคำสุภาพ!)`;
+        return res.json({
+          ok: true,
+          queued: true,
+          loopId,
+          aliveAIIds: aliveAI.map((a: any) => a.id),
+        });
       }
 
-      const result = await generateStructuredAIJson({
-        tier: "primary",
-        systemInstruction: systemPrompt,
-        userPrompt,
-        responseSchema: {
-          type: Type.OBJECT,
-          properties: {
-            messages: {
-              type: Type.ARRAY,
-              items: {
-                type: Type.OBJECT,
-                properties: {
-                  speakerId: { type: Type.STRING },
-                  speakerName: { type: Type.STRING },
-                  text: { type: Type.STRING },
-                  tone: { type: Type.STRING },
-                },
-                required: ["speakerId", "speakerName", "text", "tone"],
-              },
-            },
-          },
-          required: ["messages"],
-        },
-        jsonHint: `{ "messages": [ { "speakerId": "ai-1", "speakerName": "ชื่อบอท", "text": "ข้อความภาษาเพื่อนสนิท กู-มึง 1-3 ประโยค", "tone": "อารมณ์สั้นๆ เช่น หัวร้อน/ปั่นวง/จับพิรุธ" } ] }`,
+      // Offline / no-WS fallback: run sequentially and return JSON messages directly
+      const messages = await runBotChatLoop({
+        room: null,
+        loopId: Date.now(),
+        dayNumber: Number(dayNumber) || 1,
+        players,
+        aliveAI,
+        nightVictimNames: Array.isArray(nightVictimNames) ? nightVictimNames : [],
+        seerKnowledge,
+        bodyguardKnowledge,
+        wolfKillHistory,
+        recentTranscript: safeTranscript,
+        humanMessage,
+        speakerName,
+        mode: mode || "INITIAL_DAY",
+        streamOverWs: false,
       });
 
       return res.json({
         ok: true,
-        data: result.data,
-        modelUsed: result.modelUsed,
+        data: { messages },
         aliveAIIds: aliveAI.map((a: any) => a.id),
       });
     } catch (error: any) {
