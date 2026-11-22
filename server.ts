@@ -10,6 +10,7 @@ import {
   GoogleGenAI,
   HarmBlockThreshold,
   HarmCategory,
+  ThinkingLevel,
   Type,
 } from "@google/genai";
 
@@ -49,8 +50,8 @@ function getGeminiConfig() {
   if (!isValidKey(apiKey)) return null;
   return {
     apiKey: apiKey.trim(),
-    primaryModel: (process.env.GEMINI_MODEL_PRIMARY || "gemini-3.5-flash-lite").trim(),
-    fastModel: (process.env.GEMINI_MODEL_FAST || "gemini-3.5-flash-lite").trim(),
+    primaryModel: (process.env.GEMINI_MODEL_PRIMARY || "gemini-4-hydrogen").trim(),
+    fastModel: (process.env.GEMINI_MODEL_FAST || "gemini-3.1-flash-lite").trim(),
   };
 }
 
@@ -156,12 +157,12 @@ async function callGeminiProvider(params: {
     },
   });
 
-  // Prioritize fast, high-quota lite models first; automatic fallback if rate-limited or timed out
+  // Prioritize configured primary/fast models with valid active fallbacks
   const preferPrimary =
-    process.env.AI_PREFER_PRIMARY === "true" && params.tier === "primary";
+    process.env.AI_PREFER_PRIMARY === "true" || params.tier === "primary";
   const modelsToTry = preferPrimary
-    ? [cfg.primaryModel, cfg.fastModel, "gemini-2.5-flash-lite", "gemini-2.5-flash"]
-    : [cfg.fastModel, cfg.primaryModel, "gemini-2.5-flash-lite", "gemini-2.5-flash"];
+    ? [cfg.primaryModel, cfg.fastModel, "gemini-4-hydrogen", "gemini-3.1-flash-lite"]
+    : [cfg.fastModel, cfg.primaryModel, "gemini-3.1-flash-lite", "gemini-4-hydrogen"];
   const uniqueModels = Array.from(new Set(modelsToTry.filter(Boolean)));
 
   const now = Date.now();
@@ -175,28 +176,27 @@ async function callGeminiProvider(params: {
     const modelName = candidateModels[idx];
     const hasMoreFallbacks =
       idx < candidateModels.length - 1 || Boolean(params.hasBackupProviders);
-    // Use snappier per-attempt timeout when fallbacks/Groq exist so gameplay never stalls
     const attemptTimeoutMs = hasMoreFallbacks
-      ? Math.min(AI_TIMEOUT_MS, 12000)
+      ? Math.min(AI_TIMEOUT_MS, 15000)
       : AI_TIMEOUT_MS;
 
     try {
       const lower = modelName.toLowerCase();
-      const isFlash25 = lower.includes("2.5-flash") && !lower.includes("lite");
       const isGemini4 = lower.startsWith("gemini-4-");
       const config: any = {
         systemInstruction: params.systemInstruction,
         responseMimeType: "application/json",
         responseSchema: params.responseSchema,
         safetySettings: WEREWOLF_SAFETY_SETTINGS,
-        maxOutputTokens: params.maxOutputTokens || 900,
       };
-      if (!isGemini4) {
-        config.temperature = 0.78;
-      }
-      // Disable extended thinking on standard 2.5-flash so AI responds rapidly
-      if (isFlash25) {
-        config.thinkingConfig = { thinkingBudget: 0 };
+      if (isGemini4) {
+        // Gemini 4 models use ThinkingLevel.LOW for snappy, smart banter and do NOT accept deprecated temperature
+        config.thinkingConfig = { thinkingLevel: ThinkingLevel.LOW };
+      } else {
+        config.temperature = 0.85;
+        if (params.maxOutputTokens) {
+          config.maxOutputTokens = params.maxOutputTokens;
+        }
       }
 
       const response = await withTimeout(
@@ -226,7 +226,6 @@ async function callGeminiProvider(params: {
       const errMsg = String(err?.message || err);
       const lowerErr = errMsg.toLowerCase();
       if (lowerErr.includes("404") || lowerErr.includes("not found")) {
-        // Invalid or unavailable model name — skip for 10 minutes
         geminiModelCooldownUntil.set(modelName, Date.now() + 10 * 60 * 1000);
       } else if (
         lowerErr.includes("429") ||
@@ -234,8 +233,7 @@ async function callGeminiProvider(params: {
         lowerErr.includes("resource_exhausted") ||
         lowerErr.includes("timed out")
       ) {
-        // Rate-limited or congested — cool down for 60s so next turns stay snappy
-        geminiModelCooldownUntil.set(modelName, Date.now() + 60 * 1000);
+        geminiModelCooldownUntil.set(modelName, Date.now() + 45 * 1000);
       }
       console.warn(`[Gemini] ${modelName} failed: ${errMsg.slice(0, 180)}`);
     }
@@ -372,9 +370,13 @@ async function generateStructuredAIJson(params: {
   responseSchema: any;
   jsonHint: string;
   maxOutputTokens?: number;
-}): Promise<{ data: any; modelUsed: string } | null> {
+}): Promise<{ data: any; modelUsed: string }> {
   const configured = getConfiguredProviders();
-  if (configured.length === 0) return null;
+  if (configured.length === 0) {
+    throw new Error(
+      "ยังไม่ได้ตั้งค่า LLM API Key บนเซิร์ฟเวอร์ (กรุณาตั้งค่า GEMINI_API_KEY หรือ GROQ_API_KEY)"
+    );
+  }
 
   let orderedProviders = [...configured];
   if (process.env.AI_MIX_PROVIDERS === "true" && configured.length > 1) {
@@ -386,29 +388,39 @@ async function generateStructuredAIJson(params: {
     ];
   }
 
-  for (let i = 0; i < orderedProviders.length; i++) {
-    const provider = orderedProviders[i];
-    const hasBackupProviders = i < orderedProviders.length - 1;
-    try {
-      if (provider === "gemini") {
-        return await callGeminiProvider({ ...params, hasBackupProviders });
-      } else if (provider === "anthropic") {
-        return await callAnthropicProvider(params);
-      } else {
-        return await callOpenAICompatibleProvider({
-          provider,
-          systemInstruction: params.systemInstruction,
-          userPrompt: params.userPrompt,
-          jsonHint: params.jsonHint,
-          maxOutputTokens: params.maxOutputTokens,
-        });
+  let lastError: any = null;
+  const maxPasses = orderedProviders.length === 1 ? 2 : 1;
+
+  for (let pass = 0; pass < maxPasses; pass++) {
+    if (pass > 0) {
+      await new Promise((r) => setTimeout(r, 900 * pass));
+    }
+    for (let i = 0; i < orderedProviders.length; i++) {
+      const provider = orderedProviders[i];
+      const hasBackupProviders =
+        i < orderedProviders.length - 1 || pass < maxPasses - 1;
+      try {
+        if (provider === "gemini") {
+          return await callGeminiProvider({ ...params, hasBackupProviders });
+        } else if (provider === "anthropic") {
+          return await callAnthropicProvider(params);
+        } else {
+          return await callOpenAICompatibleProvider({
+            provider,
+            systemInstruction: params.systemInstruction,
+            userPrompt: params.userPrompt,
+            jsonHint: params.jsonHint,
+            maxOutputTokens: params.maxOutputTokens,
+          });
+        }
+      } catch (err: any) {
+        lastError = err;
+        console.error(`AI provider [${provider}] failed:`, err?.message || err);
       }
-    } catch (err: any) {
-      console.error(`AI provider [${provider}] failed:`, err?.message || err);
     }
   }
 
-  return null;
+  throw lastError || new Error("ไม่สามารถเชื่อมต่อ LLM API ได้ในขณะนี้");
 }
 
 // ============================================================
@@ -679,6 +691,10 @@ function sanitizeSnapshotForRecipient(
       Array.isArray(snapshot.bodyguardKnowledge)
         ? snapshot.bodyguardKnowledge
         : [],
+    wolfKillHistory:
+      recipientIsWolf && Array.isArray(snapshot.wolfKillHistory)
+        ? snapshot.wolfKillHistory
+        : [],
     messages: filteredMessages,
   };
 }
@@ -730,6 +746,7 @@ function mergeAuthoritativeSnapshot(
     players: mergedPlayers,
     seerKnowledge: prevSnapshot.seerKnowledge || [],
     bodyguardKnowledge: prevSnapshot.bodyguardKnowledge || [],
+    wolfKillHistory: prevSnapshot.wolfKillHistory || [],
     messages: mergedMessages,
   };
 }
@@ -1472,7 +1489,61 @@ async function startServer() {
     });
   });
 
-  // Endpoint 1: Generate natural, unscripted Thai Day Discussion (Fast Multi-AI enabled)
+  // Helper to format rich player & game-state context for all autonomous LLM endpoints
+  const formatPlayerProfileLine = (p: any) => {
+    const genderThai = p.gender === "M" ? "ชาย" : p.gender === "F" ? "หญิง" : "ไม่ระบุเพศ";
+    const callPrefix = p.gender === "F" ? `อี${p.shortName || p.name}` : `ไอ้${p.shortName || p.name}`;
+    const roleTag = `${p.role}${p.revealedBeggar ? " (เปิดการ์ดยาจกแล้ว - หมดสิทธิ์โหวต)" : ""}`;
+    if (p.isHuman) {
+      return `- ID: ${p.id} | ชื่อ: ${p.name} (เรียกในวงว่า: ${callPrefix}) | ผู้เล่นคนจริง | บทบาทลับจริง: [${roleTag}]`;
+    }
+    return `- ID: ${p.id} | ชื่อ: ${p.name} (เพศ: ${genderThai}, เรียกในวงว่า: ${callPrefix}) | นิสัยเฉพาะตัว: [${p.archetypeName || p.personaLabel}] — ${p.personaTrait}${p.archetypeGuide ? ` | สไตล์การคิด/พูด: ${p.archetypeGuide}` : ""} | บทบาทลับจริง: [${roleTag}]`;
+  };
+
+  const formatDeadPlayerLine = (p: any) => {
+    const causeText =
+      p.deathCause === "WOLF_KILL"
+        ? `โดนหมาป่าฆ่า (คืนที่ ${p.deathDay || "?"})`
+        : p.deathCause === "DAY_EXECUTION"
+        ? `โดนชาวบ้านโหวตประหาร (วันที่ ${p.deathDay || "?"})`
+        : "เสียชีวิตแล้ว";
+    const genderThai = p.gender === "M" ? "ชาย" : p.gender === "F" ? "หญิง" : "";
+    return `- ${p.name}${genderThai ? ` (${genderThai})` : ""}: ${causeText}`;
+  };
+
+  const formatVoteHistoryBlock = (voteHistory: any[], previousVotes: any[]) => {
+    if (Array.isArray(voteHistory) && voteHistory.length > 0) {
+      return voteHistory
+        .map((round: any) => {
+          const lines = (round.votes || [])
+            .map((v: any) =>
+              v.targetId === "__ABSTAIN__"
+                ? `  • ${v.voterName} งดออกเสียง`
+                : `  • ${v.voterName} โหวต ${v.targetName} ("${v.reason || ""}")`
+            )
+            .join("\n");
+          const resultNote = round.beggarRevealedName
+            ? `=> ${round.beggarRevealedName} เปิดการ์ดยาจกรอดตาย!`
+            : round.executedName
+            ? `=> ${round.executedName} ถูกโหวตประหาร`
+            : "=> เสมอ/งดออกเสียง ไม่มีใครตาย";
+          return `วันที่ ${round.day} (${resultNote}):\n${lines}`;
+        })
+        .join("\n");
+    }
+    if (Array.isArray(previousVotes) && previousVotes.length > 0) {
+      return previousVotes
+        .map((v: any) =>
+          v.targetId === "__ABSTAIN__"
+            ? `• ${v.voterName} งดออกเสียง`
+            : `• ${v.voterName} โหวต ${v.targetName}`
+        )
+        .join("\n");
+    }
+    return "ยังไม่มีประวัติการโหวตก่อนหน้านี้";
+  };
+
+  // Endpoint 1: 100% Autonomous Unscripted Thai Day Discussion (Multi-Bot Conversational Flow)
   app.post("/api/werewolf/discuss", async (req, res) => {
     try {
       const {
@@ -1482,6 +1553,9 @@ async function startServer() {
         nightVictimNames,
         seerKnowledge: reqSeerKnowledge,
         bodyguardKnowledge: reqBgKnowledge,
+        wolfKillHistory: reqWolfHistory,
+        voteHistory: reqVoteHistory,
+        doubleKillNextNight,
         recentTranscript,
         previousVotes,
         humanMessage,
@@ -1489,7 +1563,6 @@ async function startServer() {
         mode, // 'INITIAL_DAY' | 'REPLY_TO_HUMAN' | 'CONTINUE_DEBATE'
       } = req.body;
 
-      // Use server's authoritative gameSnapshot when available so non-host clients never need true roles
       const authSnap =
         roomId && rooms.get(String(roomId).trim().toUpperCase())?.gameSnapshot;
       const players = Array.isArray(authSnap?.players)
@@ -1501,94 +1574,120 @@ async function startServer() {
       const bodyguardKnowledge = Array.isArray(authSnap?.bodyguardKnowledge)
         ? authSnap.bodyguardKnowledge
         : reqBgKnowledge || [];
+      const wolfKillHistory = Array.isArray(authSnap?.wolfKillHistory)
+        ? authSnap.wolfKillHistory
+        : reqWolfHistory || [];
+      const voteHistory = Array.isArray(authSnap?.voteHistory)
+        ? authSnap.voteHistory
+        : reqVoteHistory || [];
 
       const aliveAI = players.filter((p: any) => p.alive && !p.isHuman);
       if (aliveAI.length === 0) {
-        return res.json({ fallback: false, data: { messages: [] }, aliveAIIds: [] });
+        return res.json({ ok: true, data: { messages: [] }, aliveAIIds: [] });
       }
 
       const totalCount = players.length || 10;
       const aliveAll = players.filter((p: any) => p.alive);
       const deadAll = players.filter((p: any) => !p.alive);
 
-      const playerDescriptions = aliveAll
-        .map(
-          (p: any) =>
-            `- ID: ${p.id} | ชื่อ: ${p.name} | ${p.isHuman ? "ผู้เล่นคนจริง" : `ผู้เล่น AI (${p.personaTrait})`} | [บทบาทลับจริงของคนนี้: ${p.role}${p.revealedBeggar ? " (เปิดการ์ดยาจกแล้ว ไม่มีสิทธิ์โหวต)" : ""}]`
-        )
-        .join("\n");
-
+      const aliveDescriptions = aliveAll.map(formatPlayerProfileLine).join("\n");
       const deadDescriptions =
         deadAll.length > 0
-          ? deadAll.map((p: any) => `${p.name}`).join(", ")
-          : "ยังไม่มีผู้เสียชีวิตก่อนหน้านี้";
+          ? deadAll.map(formatDeadPlayerLine).join("\n")
+          : "ยังไม่มีผู้เสียชีวิต";
+      const voteHistoryText = formatVoteHistoryBlock(voteHistory, previousVotes);
 
       const wolvesNames = players
         .filter((p: any) => isWolfRole(p.role))
-        .map((p: any) => `${p.name} (${p.role})`)
+        .map((p: any) => `${p.name} (${p.role}, ${p.alive ? "ยังมีชีวิต" : "ตายแล้ว"})`)
         .join(" และ ");
 
-      const aiIdsList = aliveAI.map((a: any) => `${a.name} [${a.id}]`).join(", ");
+      const aiIdsList = aliveAI
+        .map((a: any) => `${a.name} [${a.id} · ${a.gender === "M" ? "ชาย" : "หญิง"} · ${a.personaLabel}]`)
+        .join(", ");
 
-      const systemPrompt = `คุณคือระบบจำลองแก๊งเพื่อนสนิทคนไทยที่คบกันมา 10 ปี กำลังนั่งล้อมวงเล่นบอร์ดเกม Ultimate Werewolf กันแบบมันส์ๆ เกรียนๆ (เริ่มเกมมี ${totalCount} คน, ตอนนี้เหลือรอดชีวิต ${aliveAll.length} คน)
+      const systemPrompt = `คุณคือสมองอิสระของบอท AI แต่ละตัวในแก๊งเพื่อนสนิทคนไทยที่คบกันมา 10 ปี กำลังนั่งล้อมวงเล่นบอร์ดเกม Ultimate Werewolf (${totalCount} คน, ตอนนี้รอดชีวิต ${aliveAll.length} คน)
 
-กฎเหล็กเรื่องภาษาและโทนเสียง (ต้องทำตาม 100% ห้ามหลุดเด็ดขาด!):
-1. ใช้สรรพนามแบบเพื่อนสนิทดิบๆ หยาบคายแบบขำๆ ปั่นๆ เท่านั้น: "กู", "มึง", "ไอ้[ชื่อ]", "พวกมึง", "เอ็ง"
-2. ห้ามใช้คำสุภาพหรือคำทางการเด็ดขาด!! ห้ามมีคำว่า "ครับ", "ค่ะ", "นะครับ", "นะคะ", "คุณ", "ผม", "ฉัน", "ดิฉัน", "ท่าน" แม้แต่คำเดียว!
-3. ใช้คำสบถและสแลงวัยรุ่นไทยในวงเหล้า/วงดิสคอร์ดได้อย่างเป็นธรรมชาติและตลกเฮฮา (แบบจิกกัดขำๆ เพื่อความมันส์ ไม่ใช่เกลียดชังจริง): เช่น "เชี่ย", "สัส", "แม่ง", "ควายเอ๊ย", "อย่ามาตอแหล", "เนียนเหี้ยๆ", "โง่ชิบหาย", "กูว่าแล้ว", "มึงอย่ามาปั่น", "โคตรเหลี่ยม", "ไอ้เวร", "ตอแหลจัด", "หน้าด้าน", "555555"
-4. จังหวะการคุยต้องโคตรมีชีวิตชีวา โยนขี้ ปั่นประสาท โวยวายแก้ตัว จับพิรุธจากประวัติการโหวตเมื่อวาน หรือสวนคำพูดผู้เล่นคนจริงแบบแสบๆ คันๆ (คนละ 1-2 ประโยคสั้นๆ กระชับ แรงแต่ฮา):
-   - ตัวอย่างตอนกล่าวหา: "เฮ้ย ไอ้ต้น แม่งเงียบเหี้ยๆ เลยนะมึง หมาป่าชัวร์ป่ะเนี่ย อย่ามาทำเนียน!"
-   - ตัวอย่างตอนแก้ตัว/ลน: "เชี่ยไรพวกมึง โยนขี้ให้กูเฉย กูชาวบ้านโว้ย! ไอ้เมย์ต่างหากที่แม่งปั่นแปลกๆ สัส!"
-   - ตัวอย่างตอนจับพิรุธ: "พวกมึงดูเมื่อวานดิ ไอ้บอลไม่ยอมโหวตไอ้ฟ้า พวกเดียวกันชัวร์ ควายเอ๊ย อย่าไปเชื่อมัน!"
-5. สร้างคำพูดเฉพาะจากผู้เล่น AI ที่ยังมีชีวิตอยู่เท่านั้น (${aiIdsList}) — ห้ามสร้างคำพูดแทนผู้เล่นคนจริงเด็ดขาด
-6. ห้ามโกงด้วยข้อมูลนอกบทบาท! แต่ละคนรู้เฉพาะข้อมูลของบทบาทตัวเองเท่านั้น:
-   - WEREWOLF (พ่อหมาป่า) / WOLF_CUB (ลูกหมาป่า) / HUMAN_WOLF (หมาป่ามนุษย์) [ได้แก่: ${wolvesNames}]: รู้จักกันเอง ตอแหลเนียนเป็นชาวบ้าน ปั่นโยนขี้ให้คนอื่นแบบหน้าด้านๆ (พิเศษ: HUMAN_WOLF รู้ตัวว่าหมอดูส่องตัวเองจะเห็นเป็นชาวบ้าน เลยกล้าท้าให้หมอดูส่องแบบกวนตีน)
-   - SEER (เทพพยากรณ์): รู้เฉพาะผลส่องลูกแก้วของตัวเองเท่านั้น (${JSON.stringify(seerKnowledge)}) — ห้ามโกงเด็ดขาด! หากผลส่องระบุว่าใครเป็นชาวบ้าน (แม้ตัวจริงจะเป็น HUMAN_WOLF) หมอดูจะต้องเชื่อตามผลส่องว่าเป็นชาวบ้าน
-   - BODYGUARD: รู้ว่าตัวเองคุ้มกันใคร (${JSON.stringify(bodyguardKnowledge)})
-   - VILLAGER / BEGGAR: ไม่รู้บทบาทใครเลย เดาสด ปั่นสด สาดโคลนกันตามสถานการณ์จริง`;
+กฎเหล็ก 100% — คิดสดเองตามสถานการณ์จริง ห้ามพูดซ้ำซาก ห้ามใช้แพตเทิร์นสำเร็จรูป:
+1. **บุคลิกและเพศเฉพาะตัว (ต้องสวมบทบาทเป๊ะทุกตัว!)**:
+   - บอทแต่ละตัวมี "เพศ (ชาย/หญิง)" และ "นิสัยเฉพาะตัว (Archetype)" ที่กำหนดไว้ในข้อมูลด้านล่าง จงให้บอทคิด วิเคราะห์ ตอบโต้ โกหก และใช้จังหวะคำพูดให้ตรงกับนิสัยและเพศของตัวเอง 100%
+   - เรียกเพื่อนผู้ชายว่า "ไอ้[ชื่อ]" และเรียกเพื่อนผู้หญิงว่า "อี[ชื่อ]" หรือ "[ชื่อ]" ให้ตรงเพศจริงๆ ในวงเพื่อนสนิท
+2. **ภาษาเพื่อนซี้ดิบๆ ฮาๆ (ห้ามมีคำสุภาพแม้แต่คำเดียว!)**:
+   - ใช้เฉพาะ "กู", "มึง", "พวกมึง", "ไอ้...", "อี..." และสแลงวงเหล้า/วงดิสคอร์ด เช่น "เชี่ย", "สัส", "แม่ง", "ตอแหล", "เหลี่ยม", "เนียนเหี้ยๆ", "โง่ชิบหาย", "ควายเอ๊ย", "5555" (จิกกัดฮาๆ แข่งกันมันส์ๆ ไม่ใช่เกลียดชังจริง)
+   - **ห้ามเด็ดขาด**: ห้ามมีคำว่า "ครับ", "ค่ะ", "นะครับ", "นะคะ", "คุณ", "ผม", "ฉัน", "ดิฉัน", "ท่าน"
+   - พิมพ์สั้น กระชับ เป็นธรรมชาติเหมือนแชทกลุ่มจริง (คนละ 1-3 ประโยคสั้นๆ ไม่ใช่เรียงความ)
+3. **การวางแผนอิสระตามบทบาทลับ (ห้ามโกงข้อมูลนอกบทบาท!)**:
+   - **WEREWOLF / WOLF_CUB / HUMAN_WOLF** [ฝูงหมาป่าคือ: ${wolvesNames} | ประวัติการล่า: ${JSON.stringify(wolfKillHistory)}]: รู้จักกันเอง คิดแผนเนียนๆ เองได้อิสระ — โกหกป้ายสีชาวบ้าน, แอบช่วยเพื่อนหมาป่าแบบไม่ให้โจ่งแจ้ง, หรือถ้าจนมุมสามารถ "แกล้งเคลมเป็นหมอดู/บอดี้การ์ด" เพื่อปั่นวงได้! (พิเศษ: HUMAN_WOLF รู้ว่าหมอดูส่องตัวเองจะเห็นเป็นชาวบ้าน จึงกล้าท้าให้หมอดูส่อง!)
+   - **SEER (เทพพยากรณ์)**: รู้เฉพาะผลส่องของตัวเอง (${JSON.stringify(seerKnowledge)}) — ตัดสินใจเองอย่างฉลาดว่าจะซ่อนตัวก่อนหรือเปิดการ์ดแฉตอนไหนเพื่อช่วยหมู่บ้าน! ห้ามโกงรู้ว่า HUMAN_WOLF เป็นหมาป่าถ้าผลส่องเป็น false
+   - **BODYGUARD (บอดี้การ์ด)**: รู้เฉพาะประวัติการคุ้มกันของตัวเอง (${JSON.stringify(bodyguardKnowledge)}) — ตัดสินใจเองว่าจะเก็บตัวเงียบหรือใบ้/เปิดเผยเพื่อช่วยคนที่ตัวเองเซฟไว้
+   - **BEGGAR (ยาจก/คนงี่เง่า)**: สามารถแกล้งพูดกวนๆ หรือล่อเป้าให้คนสงสัยแบบเนียนๆ (แต่อย่าเฉลยตรงๆ ว่าตัวเองเป็นยาจก)
+   - **VILLAGER (ชาวบ้าน)**: ไม่รู้บทบาทใคร วิเคราะห์สดจากคำพูด พิรุธ เหตุการณ์ตาย และประวัติการโหวตจริง
+4. **บทสนทนาโต้ตอบกันเองแบบมีชีวิต (Multi-Bot Back-and-Forth)**:
+   - สร้างคำพูดเฉพาะจากบอท AI ที่ยังมีชีวิตอยู่เท่านั้น (${aiIdsList}) — ห้ามสร้างคำพูดแทนผู้เล่นคนจริงเด็ดขาด
+   - ให้บอทโต้ตอบกันเองเป็นลำดับต่อกันจริง! เช่น บอทคนที่ 2 เถียง/สวนกลับ/เห็นด้วยกับสิ่งที่บอทคนที่ 1 หรือผู้เล่นคนจริงเพิ่งพิมพ์ไปสดๆ ร้อนๆ และถ้าบอทตัวไหนถูกพาดพิงหรือถูกกล่าวหาในแชท ให้บอทตัวนั้นรีบโผล่มาแก้ตัวหรือด่าสวนตามนิสัยของมันทันที!`;
 
       const humanDisplayName = speakerName || "ผู้เล่น";
-      const targetMsgCount = Math.min(aliveAI.length, mode === "INITIAL_DAY" ? 4 : 3);
+      const targetMsgCount = Math.min(aliveAI.length, mode === "INITIAL_DAY" ? 5 : 4);
+      const minMsgCount = Math.min(aliveAI.length, mode === "INITIAL_DAY" ? 3 : 2);
 
       let userPrompt = "";
       if (mode === "REPLY_TO_HUMAN") {
-        userPrompt = `กลางวันวันที่ ${dayNumber}
-ผู้มีชีวิตอยู่ (${aliveAll.length} คน):
-${playerDescriptions}
-ผู้ที่ตายไปแล้ว: ${deadDescriptions}
+        userPrompt = `=== กลางวันวันที่ ${dayNumber} (โต้ตอบคำพูดล่าสุดของผู้เล่นคนจริง + เถียงกันต่อ) ===
+ผู้เล่นที่ยังมีชีวิต (${aliveAll.length} คน):
+${aliveDescriptions}
 
-บทสนทนาล่าสุด:
-${(recentTranscript || []).slice(-10).join("\n")}
+ผู้เสียชีวิตแล้ว:
+${deadDescriptions}
 
-ล่าสุด "ไอ้${humanDisplayName}" พูดว่า: "${humanMessage}"
-ให้ผู้เล่น AI 1-${targetMsgCount} คน สวนกลับ/แซว/จิกกัด หรือเห็นด้วยกับคำพูดของ "${humanDisplayName}" แบบแก๊งเพื่อนสนิท กู-มึง (ห้ามมี ครับ/ค่ะ/คุณ/ผม/ฉัน เด็ดขาด! คนละ 1-2 ประโยคสั้นๆ แสบๆ ฮาๆ)`;
+ประวัติการโหวตที่ผ่านมา:
+${voteHistoryText}
+
+แชทล่าสุดในห้อง (15 ข้อความล่าสุด):
+${(recentTranscript || []).slice(-15).join("\n")}
+
+🔥 ล่าสุด "${humanDisplayName}" เพิ่งพิมพ์ในแชทว่า: "${humanMessage}"
+
+ให้บอท AI ${minMsgCount}-${targetMsgCount} ตัว (เลือกตัวที่ถูกพาดพิงก่อน + ตัวที่มีนิสัยชอบสวน/วิเคราะห์) โต้ตอบคำพูดของ "${humanDisplayName}" และโต้เถียงต่อยอดกันเองตามบทบาทลับและนิสัยเฉพาะตัวของแต่ละคน (1-3 ประโยคสั้นๆ ดิบๆ ฮาๆ ภาษา กู-มึง ห้ามมีคำสุภาพ!)`;
       } else if (mode === "CONTINUE_DEBATE") {
-        userPrompt = `กลางวันวันที่ ${dayNumber} (เถียงกันเดือดก่อนโหวต)
-ผู้มีชีวิตอยู่ (${aliveAll.length} คน):
-${playerDescriptions}
+        userPrompt = `=== กลางวันวันที่ ${dayNumber} (ถกเถียงเดือดต่อเนื่องก่อนลงคะแนนโหวต) ===
+ผู้เล่นที่ยังมีชีวิต (${aliveAll.length} คน):
+${aliveDescriptions}
 
-บทสนทนาล่าสุด:
-${(recentTranscript || []).slice(-10).join("\n")}
+ผู้เสียชีวิตแล้ว:
+${deadDescriptions}
 
-ให้ผู้เล่น AI 1-${targetMsgCount} คน เถียงกันต่อ โยนขี้ จับผิด หรือแก้ตัวแบบแก๊งเพื่อนสนิท กู-มึง ดิบๆ ฮาๆ (ห้ามมี ครับ/ค่ะ/คุณ/ผม/ฉัน เด็ดขาด! คนละ 1-2 ประโยค)`;
+ประวัติการโหวตที่ผ่านมา:
+${voteHistoryText}
+
+แชทล่าสุดในห้อง (15 ข้อความล่าสุด):
+${(recentTranscript || []).slice(-15).join("\n")}
+
+ให้บอท AI ${minMsgCount}-${targetMsgCount} ตัว เถียงกันต่อ จี้พิรุธจากแชทล่าสุด แก้ตัวถ้าโดนพาดพิง หรือจับโป๊ะจากประวัติโหวต โดยให้บอทตัวหลังโต้ตอบคำพูดบอทตัวก่อนหน้าด้วย (1-3 ประโยคสั้นๆ ตรงนิสัยและเพศของแต่ละตัว ภาษา กู-มึง ล้วนๆ!)`;
       } else {
-        userPrompt = `เช้าวันที่ ${dayNumber}
+        userPrompt = `=== เช้าวันที่ ${dayNumber} (เพิ่งตื่นจากกลางคืน) ===
 เหตุการณ์เมื่อคืน: ${
           nightVictimNames && nightVictimNames.length > 0
-            ? `${nightVictimNames.join(" และ ")} โดนหมาป่ากัดตายห่าเมื่อคืนนี้`
-            : "เมื่อคืนไม่มีใครตายเลย! (บอดี้การ์ดโคตรเทพ กันถูกคน)"
+            ? `${nightVictimNames.join(" และ ")} โดนหมาป่าฆ่าตายเมื่อคืนนี้!${doubleKillNextNight ? " (ลูกหมาป่าตายด้วย คืนหน้าหมาป่าจะฆ่าได้ 2 ศพ!)" : ""}`
+            : "เมื่อคืนสงบสุข ไม่มีใครตายเลย! (บอดี้การ์ดเซฟถูกคน)"
         }
-ผู้ที่ตายไปแล้ว: ${deadDescriptions}
-ประวัติโหวตเมื่อวาน: ${JSON.stringify(previousVotes || [])}
 
-ผู้มีชีวิตอยู่ (${aliveAll.length} คน):
-${playerDescriptions}
+ผู้เล่นที่ยังมีชีวิต (${aliveAll.length} คน):
+${aliveDescriptions}
 
-ให้ผู้เล่น AI ${Math.min(aliveAI.length, 3)}-${targetMsgCount} คน เปิดวงเม้าท์แตก จับพิรุธ โยนขี้กันเองช่วงเช้าแบบแก๊งเพื่อนสนิท กู-มึง (ห้ามมี ครับ/ค่ะ/คุณ/ผม/ฉัน เด็ดขาด! คนละ 1-2 ประโยค)`;
+ผู้เสียชีวิตแล้ว:
+${deadDescriptions}
+
+ประวัติการโหวตที่ผ่านมา:
+${voteHistoryText}
+
+แชทล่าสุดก่อนหน้า:
+${(recentTranscript || []).slice(-15).join("\n") || "(เพิ่งเริ่มวันแรก)"}
+
+ให้บอท AI ${minMsgCount}-${targetMsgCount} ตัว เปิดวงคุยกันสดๆ หลังรู้ข่าวเมื่อคืน โดยให้แต่ละตัวแสดงปฏิกิริยา คิดวิเคราะห์ โยนขี้ ปั่นวง หรือโต้เถียงสวนกันไปมาตามเพศ นิสัยเฉพาะตัว และบทบาทลับของตัวเอง (1-3 ประโยคสั้นๆ ภาษา กู-มึง ล้วนๆ ห้ามมีคำสุภาพ!)`;
       }
 
       const result = await generateStructuredAIJson({
-        tier: "fast",
+        tier: "primary",
         systemInstruction: systemPrompt,
         userPrompt,
         responseSchema: {
@@ -1610,26 +1709,25 @@ ${playerDescriptions}
           },
           required: ["messages"],
         },
-        jsonHint: `{ "messages": [ { "speakerId": "ai-1", "speakerName": "ชื่อผู้เล่น AI", "text": "ข้อความภาษาไทย 1-2 ประโยค", "tone": "ท่าทีสั้นๆ" } ] }`,
+        jsonHint: `{ "messages": [ { "speakerId": "ai-1", "speakerName": "ชื่อบอท", "text": "ข้อความภาษาเพื่อนสนิท กู-มึง 1-3 ประโยค", "tone": "อารมณ์สั้นๆ เช่น หัวร้อน/ปั่นวง/จับพิรุธ" } ] }`,
       });
 
-      if (!result) {
-        return res.status(200).json({ fallback: true });
-      }
-
       return res.json({
-        fallback: false,
+        ok: true,
         data: result.data,
         modelUsed: result.modelUsed,
         aliveAIIds: aliveAI.map((a: any) => a.id),
       });
     } catch (error: any) {
       console.error("AI discuss error:", error?.message || error);
-      return res.status(200).json({ fallback: true, error: error?.message });
+      return res.status(503).json({
+        ok: false,
+        error: error?.message || "LLM API ไม่พร้อมใช้งานชั่วคราว",
+      });
     }
   });
 
-  // Endpoint 2: Generate logical, INDEPENDENT AI Votes and Reasons in Thai (Fast Multi-AI enabled)
+  // Endpoint 2: 100% Autonomous AI Voting Decisions & In-Character Reasons
   app.post("/api/werewolf/vote", async (req, res) => {
     try {
       const {
@@ -1638,6 +1736,8 @@ ${playerDescriptions}
         players: reqPlayers,
         seerKnowledge: reqSeerKnowledge,
         bodyguardKnowledge: reqBgKnowledge,
+        wolfKillHistory: reqWolfHistory,
+        voteHistory: reqVoteHistory,
         recentTranscript,
       } = req.body;
 
@@ -1652,39 +1752,50 @@ ${playerDescriptions}
       const bodyguardKnowledge = Array.isArray(authSnap?.bodyguardKnowledge)
         ? authSnap.bodyguardKnowledge
         : reqBgKnowledge || [];
+      const wolfKillHistory = Array.isArray(authSnap?.wolfKillHistory)
+        ? authSnap.wolfKillHistory
+        : reqWolfHistory || [];
+      const voteHistory = Array.isArray(authSnap?.voteHistory)
+        ? authSnap.voteHistory
+        : reqVoteHistory || [];
 
       const aliveAll = players.filter((p: any) => p.alive);
+      const deadAll = players.filter((p: any) => !p.alive);
       const eligibleAI = aliveAll.filter(
         (p: any) => !p.isHuman && p.canVote !== false
       );
 
       if (eligibleAI.length === 0) {
-        return res.json({ fallback: false, data: { votes: [] } });
+        return res.json({ ok: true, data: { votes: [] } });
       }
 
-      const totalCount = players.length || 10;
-
-      const systemPrompt = `คุณคือสมองของแก๊งเพื่อนสนิท AI แต่ละคนในการตัดสินใจโหวตประหารในเกม Ultimate Werewolf ภาษาไทย (เริ่มเกม ${totalCount} คน)
+      const systemPrompt = `คุณคือสมองอิสระของบอท AI แต่ละตัวในช่วง "ลงคะแนนโหวตประหาร" เกม Ultimate Werewolf ภาษาไทย
 กฎเหล็กของการโหวต:
-1. ผู้เล่น AI แต่ละคนคิดวิเคราะห์และตัดสินใจโหวตด้วยตัวเองจากบทสนทนาวันนี้และข้อมูลลับเฉพาะบทบาท (ห้ามโหวตตามผู้เล่นมนุษย์แบบไร้เหตุผล)
-2. ห้ามโหวตตัวเอง และไม่โหวตคนที่หงายการ์ดเป็นยาจกไปแล้ว
-3. ฝ่ายหมาป่า ได้แก่ พ่อหมาป่า (WEREWOLF), ลูกหมาป่า (WOLF_CUB), หมาป่ามนุษย์ (HUMAN_WOLF): ห้ามโหวตกันเองเด็ดขาด ให้โหวตชาวบ้านที่ดูน่าสงสัยหรือเป็นภัย
-4. เทพพยากรณ์ (SEER): หากผลส่องลูกแก้วระบุว่าใครเป็นหมาป่า (${JSON.stringify(seerKnowledge)}) จะโหวตคนนั้นทันที และจะไม่โหวตคนที่ผลส่องระบุว่าเป็นชาวบ้าน (ห้ามโกงรู้ตัวจริงของ HUMAN_WOLF ถ้าผลส่องเป็น false)
+1. บอท AI แต่ละตัวตัดสินใจโหวตด้วยตรรกะ อารมณ์ นิสัยเฉพาะตัว (Archetype) และบทบาทลับของตัวเองอย่างอิสระจากแชทวันนี้และประวัติโหวตเก่า (ห้ามลอกโหวตตามผู้เล่นคนจริงแบบไร้เหตุผล)
+2. ห้ามโหวตตัวเองเด็ดขาด และไม่โหวตคนที่เปิดการ์ดเป็นยาจกไปแล้ว
+3. ฝ่ายหมาป่า (WEREWOLF / WOLF_CUB / HUMAN_WOLF) [ประวัติล่า: ${JSON.stringify(wolfKillHistory)}]: ห้ามโหวตพวกเดียวกันเองเด็ดขาด (ยกเว้นจำเป็นสุดๆ ที่เพื่อนหมาป่าโดนแฉขาดลอยแล้วอยากเนียน) ให้โหวตชาวบ้านที่เป็นภัยหรือกำลังถูกวงเพ่งเล็ง
+4. เทพพยากรณ์ (SEER): รู้ผลส่อง (${JSON.stringify(seerKnowledge)}) — ถ้าส่องเจอใครเป็นหมาป่าให้โหวตคนนั้นทันที และหลีกเลี่ยงโหวตคนที่ส่องเห็นเป็นชาวบ้าน (ห้ามโกงรู้ตัวจริงของ HUMAN_WOLF ถ้าผลส่องเป็น false)
 5. บอดี้การ์ด (BODYGUARD): ใช้ข้อมูลคนที่คุ้มกัน (${JSON.stringify(bodyguardKnowledge)}) ประกอบการตัดสินใจ
-6. หาก AI บางคนรู้สึกว่าข้อมูลยังไม่ชัดเจนพอจริงๆ สามารถเลือกไม่โหวตโดยส่ง targetId เป็น "__ABSTAIN__" ได้ (แต่ถ้ามีเบาะแสหรือผู้ต้องสงสัยชัดเจนให้โหวตตามตรรกะ)
-7. เหตุผลการโหวต (reason) ต้องเขียนเป็นภาษาแก๊งเพื่อนสนิท "กู-มึง" แบบดิบๆ กวนๆ ฮาๆ สั้นไม่เกิน 1 ประโยค ห้ามใช้คำสุภาพ (ห้ามมี ครับ/ค่ะ/คุณ/ผม/ฉัน/นะครับ เด็ดขาด! เช่น "ไอ้นี่แม่งตอแหลชัดๆ กูจัดให้มึงลงหลุมเลย!", "เงียบเหี้ยๆ ทรงหมาป่าชัวร์ ไปตายซะมึง!")`;
+6. ถ้าบอทตัวไหนลังเลหรือข้อมูลไม่พอจริงๆ สามารถเลือกไม่โหวตโดยส่ง targetId เป็น "__ABSTAIN__" ได้
+7. เหตุผลการโหวต (reason) ต้องเขียนสดๆ 1 ประโยคสั้นๆ ให้ตรงกับเพศและนิสัยเฉพาะตัวของบอทตัวนั้นๆ ใช้ภาษาแก๊งเพื่อนสนิท "กู-มึง / ไอ้... / อี..." ห้ามมีคำสุภาพ (ห้ามมี ครับ/ค่ะ/คุณ/ผม/ฉัน/นะครับ เด็ดขาด!)`;
 
-      const userPrompt = `กลางวันวันที่ ${dayNumber} - ช่วงลงมติโหวตประหาร
-รายชื่อผู้มีชีวิตอยู่:
-${aliveAll.map((p: any) => `- ID: ${p.id} | ชื่อ: ${p.name} | บทบาทลับ: ${p.role} | สิทธิ์โหวต: ${p.canVote !== false ? "มี" : "เสียสิทธิ์โหวตแล้ว (ยาจก)"}`).join("\n")}
+      const userPrompt = `=== กลางวันวันที่ ${dayNumber} — ลงมติโหวตประหาร ===
+ผู้เล่นที่ยังมีชีวิตอยู่:
+${aliveAll.map(formatPlayerProfileLine).join("\n")}
 
-บทสนทนาวันนี้:
-${(recentTranscript || []).slice(-12).join("\n")}
+ผู้เสียชีวิตแล้ว:
+${deadAll.length > 0 ? deadAll.map(formatDeadPlayerLine).join("\n") : "ยังไม่มี"}
 
-ระบุการโหวตของ AI ที่มีสิทธิ์โหวตทุกคน (${eligibleAI.map((p: any) => `${p.name} [${p.id}]`).join(", ")}) พร้อมเหตุผลแบบแก๊งเพื่อน กู-มึง สั้นๆ แสบๆ`;
+ประวัติโหวตรอบก่อนหน้า:
+${formatVoteHistoryBlock(voteHistory, [])}
+
+แชทล่าสุดในสภา (15 ข้อความล่าสุด):
+${(recentTranscript || []).slice(-15).join("\n")}
+
+จงระบุการโหวตของบอท AI ที่มีสิทธิ์โหวตครบทุกตัว (${eligibleAI.map((p: any) => `${p.name} [${p.id} · ${p.personaLabel}]`).join(", ")}) พร้อมเหตุผลสดๆ ตรงคาแรกเตอร์`;
 
       const result = await generateStructuredAIJson({
-        tier: "fast",
+        tier: "primary",
         systemInstruction: systemPrompt,
         userPrompt,
         responseSchema: {
@@ -1705,25 +1816,24 @@ ${(recentTranscript || []).slice(-12).join("\n")}
           },
           required: ["votes"],
         },
-        jsonHint: `{ "votes": [ { "voterId": "ai-1", "targetId": "ai-2", "reason": "เหตุผลสั้นๆ 1 ประโยค" } ] }`,
+        jsonHint: `{ "votes": [ { "voterId": "ai-1", "targetId": "ai-2", "reason": "เหตุผลสดๆ 1 ประโยคภาษาเพื่อนซี้ตรงนิสัย" } ] }`,
       });
 
-      if (!result) {
-        return res.status(200).json({ fallback: true });
-      }
-
       return res.json({
-        fallback: false,
+        ok: true,
         data: result.data,
         modelUsed: result.modelUsed,
       });
     } catch (error: any) {
       console.error("AI vote error:", error?.message || error);
-      return res.status(200).json({ fallback: true, error: error?.message });
+      return res.status(503).json({
+        ok: false,
+        error: error?.message || "LLM API ไม่สามารถประมวลผลโหวต AI ได้ในขณะนี้",
+      });
     }
   });
 
-  // Endpoint 3: Post-Game AI Debrief — candid Thai reactions (praise, roast, shock, brag) after all roles are revealed!
+  // Endpoint 3: 100% Autonomous Post-Game Roasting & Candid Debrief (All AI Bots)
   app.post("/api/werewolf/postgame", async (req, res) => {
     try {
       const {
@@ -1735,6 +1845,8 @@ ${(recentTranscript || []).slice(-12).join("\n")}
         recentTranscript,
         seerKnowledge: reqSeerKnowledge,
         bodyguardKnowledge: reqBgKnowledge,
+        wolfKillHistory: reqWolfHistory,
+        voteHistory: reqVoteHistory,
       } = req.body;
 
       const authSnap =
@@ -1748,49 +1860,62 @@ ${(recentTranscript || []).slice(-12).join("\n")}
       const bodyguardKnowledge = Array.isArray(authSnap?.bodyguardKnowledge)
         ? authSnap.bodyguardKnowledge
         : reqBgKnowledge || [];
+      const wolfKillHistory = Array.isArray(authSnap?.wolfKillHistory)
+        ? authSnap.wolfKillHistory
+        : reqWolfHistory || [];
+      const voteHistory = Array.isArray(authSnap?.voteHistory)
+        ? authSnap.voteHistory
+        : reqVoteHistory || [];
 
       const aiPlayers = players.filter((p: any) => !p.isHuman);
       if (aiPlayers.length === 0) {
-        return res.json({ fallback: false, data: { reactions: [] } });
+        return res.json({ ok: true, data: { reactions: [] } });
       }
 
       const rosterSummary = players
-        .map(
-          (p: any) =>
-            `- ID: ${p.id} | ชื่อ: ${p.name} | ${p.isHuman ? "ผู้เล่นคนจริง" : `AI (${p.personaTrait})`} | บทบาทจริง: ${p.role} | สถานะ: ${p.alive ? "รอดชีวิต" : "เสียชีวิตแล้ว"}`
-        )
+        .map((p: any) => {
+          const status = p.alive
+            ? "รอดชีวิต"
+            : p.deathCause === "WOLF_KILL"
+            ? `โดนหมาป่าฆ่าคืนที่ ${p.deathDay || "?"}`
+            : p.deathCause === "DAY_EXECUTION"
+            ? `โดนโหวตประหารวันที่ ${p.deathDay || "?"}`
+            : "เสียชีวิต";
+          const g = p.gender === "M" ? "ชาย" : p.gender === "F" ? "หญิง" : "คนจริง";
+          return `- ID: ${p.id} | ชื่อ: ${p.name} (${g}${p.isHuman ? "" : ` · นิสัย: ${p.archetypeName || p.personaLabel}`}) | บทบาทจริง: ${p.role} | สถานะ: ${status}`;
+        })
         .join("\n");
 
       const systemPrompt = `เกม Ultimate Werewolf จบลงแล้วและทุกคนหงายการ์ดเฉลยบทบาทจริงทั้งหมดบนโต๊ะแล้ว!
-จงสร้างบทพูด "ด่ากราด / เผาเพื่อน / ขิงยับหลังจบเกม" ของผู้เล่น AI ทุกคน (ทั้งคนที่รอดและคนที่ตายไปแล้ว) เหมือนแก๊งเพื่อนสนิท 10 ปีในวงเหล้าหรือวงดิสคอร์ดที่เพิ่งเล่นบอร์ดเกมจบแล้วระเบิดอารมณ์ใส่กันทันที!
+จงสร้างบทพูด "เผาเพื่อน / ด่ากราด / ขิงยับ / ช็อกตาค้างหลังจบเกม" ของบอท AI ครบทุกตัว (ทั้งที่รอดและที่ตายไปแล้ว) เหมือนแก๊งเพื่อนสนิท 10 ปีในวงเหล้าหรือดิสคอร์ดที่เพิ่งจบเกมแล้วระเบิดอารมณ์ใส่กันทันที!
 
-กฎเหล็กภาษา (ต้องทำตาม 100%):
-- ใช้สรรพนาม "กู", "มึง", "ไอ้[ชื่อ]", "พวกมึง" เท่านั้น! ห้ามมีคำว่า "ครับ", "ค่ะ", "นะครับ", "คุณ", "ผม", "ฉัน" แม้แต่คำเดียว!
-- ใช้ภาษาดิบๆ ฮาๆ เผากันยับแบบไม่ไว้หน้า (แต่สนุกสนานเป็นมิตรภาพวงเพื่อน ไม่ใช่เกลียดชังจริง): เช่น "555555", "เชี่ย", "สัส", "แม่ง", "ควายเอ๊ย", "โง่ชิบหาย", "โคตรเหลี่ยม", "ไอ้เวร", "เนียนเหี้ยๆ", "หลอกแดกทั้งวง", "สมน้ำหน้า"
-- ชาวบ้านด่ากันเองที่โหวตโง่ๆ หรือไม่ยอมเชื่อกัน หรือด่าบอดี้การ์ด/หมอดู: เช่น "บอดี้การ์ดมึงไปเซฟใครวะเนี่ย ปล่อยเซียร์ตายโง่ๆ เลยไอ้เวร!", "กูบอกพวกมึงตั้งแต่แรกแล้วไม่เชื่อกู เป็นไงล่ะ ควายทั้งวง!"
-- หมาป่าที่ชนะขิงยับสะใจ: เช่น "555555 โคตรโง่ โดนกูหลอกแดกทั้งวง เหลี่ยมจัดๆ!", "ตอแหลหน้าตายยังเชื่อกันหมด สัสโคตรมันส์!" ส่วนหมาป่าที่แพ้ก็หัวร้อนหรือยอมใจเพื่อนที่จับได้
-- ถ้ามีหมาป่ามนุษย์ (HUMAN_WOLF) ที่หลอกส่องหมอดูได้ ให้หมอดูหรือเพื่อนโวยวายช็อกตาค้างใส่ไอ้หมาป่ามนุษย์ตัวนั้น!
-- อ้างอิงชื่อผู้เล่นจริงในกระดาน (รวมถึงผู้เล่นคนจริง) และเหตุการณ์จริงในเกม คนละ 1-2 ประโยคสั้นๆ แรงๆ ฮาๆ
-- สร้างให้ครบผู้เล่น AI ทุกคน: ${aiPlayers.map((p: any) => `${p.name} [${p.id}]`).join(", ")}`;
+กฎเหล็ก 100%:
+1. **ตรงเพศและนิสัยเฉพาะตัว (Archetype) ทุกตัว!** เช่น สายบวกหัวร้อนจะด่าเดือดสุด, สายปั่นขี้แกล้งจะหัวเราะเยาะ 5555, สายวิเคราะห์จะบ่นตรรกะเพื่อน, สายปากแจ๋วจะจิกกัดยับ, สายแอ๊บใสซื่อจะขิงความเนียนหรือแกล้งทำเป็นช็อก
+2. **ภาษาเพื่อนสนิทดิบๆ ล้วนๆ**: ใช้เฉพาะ "กู", "มึง", "พวกมึง", "ไอ้[ชื่อผู้ชาย]", "อี[ชื่อผู้หญิง]" พร้อมสแลงฮาๆ ("5555", "เชี่ย", "สัส", "แม่ง", "ควายเอ๊ย", "โง่ชิบหาย", "โคตรเหลี่ยม", "เนียนเหี้ยๆ", "หลอกแดกทั้งวง") — **ห้ามมีคำสุภาพ (ครับ/ค่ะ/คุณ/ผม/ฉัน/นะครับ) แม้แต่คำเดียว!**
+3. **อ้างอิงเหตุการณ์จริงในเกมนี้**: พาดพิงชื่อคนจริงและเพื่อนบอท, จังหวะโหวตพลาดจริง, จังหวะบอดี้การ์ดเซฟถูก/เซฟผิดจริง, จังหวะหมอดูส่องโดนหมาป่าหรือโดนหมาป่ามนุษย์หลอกสแกนจริง (1-2 ประโยคสั้นๆ แสบๆ ฮาๆ ไม่ซ้ำกันเลย)
+4. สร้างให้ครบทุกตัวในรายชื่อ AI นี้: ${aiPlayers.map((p: any) => `${p.name} [${p.id}]`).join(", ")}`;
 
-      const userPrompt = `สรุปผลเกม (จบในวันที่ ${dayCount || 1}):
+      const userPrompt = `=== สรุปผลเกม (จบวันที่ ${dayCount || 1}) ===
 ฝ่ายที่ชนะ: ${winner === "VILLAGE" ? "ฝ่ายชาวบ้านชนะ" : "ฝ่ายมนุษย์หมาป่าชนะ"}
 รายละเอียด: ${reasonThai || ""}
 
-เฉลยบทบาททุกคนในกระดาน:
+เฉลยบทบาทและนิสัยทุกคนบนโต๊ะ:
 ${rosterSummary}
 
-บันทึกการส่องของเทพพยากรณ์: ${JSON.stringify(seerKnowledge)}
-บันทึกการคุ้มกันของบอดี้การ์ด: ${JSON.stringify(bodyguardKnowledge)}
+บันทึกเทพพยากรณ์: ${JSON.stringify(seerKnowledge)}
+บันทึกบอดี้การ์ด: ${JSON.stringify(bodyguardKnowledge)}
+ประวัติการล่าของฝูงหมาป่า: ${JSON.stringify(wolfKillHistory)}
+ประวัติการโหวตทั้งเกม:
+${formatVoteHistoryBlock(voteHistory, [])}
 
-เหตุการณ์และคำพูดสำคัญในเกม:
+เหตุการณ์และแชทสำคัญในเกม:
 ${(recentTranscript || []).slice(-18).join("\n")}
 
-จงสร้างคำพูดเผาเพื่อน/ขิงยับ/หัวร้อนหลังจบเกมแบบ กู-มึง ดิบๆ ฮาๆ ของผู้เล่น AI ทุกคน (ห้ามมี ครับ/ค่ะ/คุณ/ผม/ฉัน เด็ดขาด!) พร้อม moodTag สั้นๆ (เช่น "ขิงยับสะใจ", "หัวร้อนด่ากราด", "ช็อกตาค้าง", "เผาเพื่อนยับ", "คารวะความเหลี่ยม") และ sentiment (praise | roast | shock | proud)`;
+จงสร้างคำพูดเปิดใจเผาเพื่อน/ขิงยับหลังจบเกมของบอท AI ครบทุกตัว พร้อม moodTag สั้นๆ และ sentiment (praise | roast | shock | proud)`;
 
       const result = await generateStructuredAIJson({
-        tier: "fast",
-        maxOutputTokens: 1400,
+        tier: "primary",
+        maxOutputTokens: 1600,
         systemInstruction: systemPrompt,
         userPrompt,
         responseSchema: {
@@ -1813,25 +1938,24 @@ ${(recentTranscript || []).slice(-18).join("\n")}
           },
           required: ["reactions"],
         },
-        jsonHint: `{ "reactions": [ { "speakerId": "ai-1", "speakerName": "ชื่อ AI", "moodTag": "ชมเปาะ (MVP)", "sentiment": "praise", "text": "ข้อความเปิดใจหลังจบเกม 1-2 ประโยค" } ] }`,
+        jsonHint: `{ "reactions": [ { "speakerId": "ai-1", "speakerName": "ชื่อบอท", "moodTag": "ขิงยับ/ด่ากราด", "sentiment": "roast", "text": "ข้อความสดๆ หลังจบเกม 1-2 ประโยค" } ] }`,
       });
 
-      if (!result) {
-        return res.status(200).json({ fallback: true });
-      }
-
       return res.json({
-        fallback: false,
+        ok: true,
         data: result.data,
         modelUsed: result.modelUsed,
       });
     } catch (error: any) {
       console.error("AI postgame error:", error?.message || error);
-      return res.status(200).json({ fallback: true, error: error?.message });
+      return res.status(503).json({
+        ok: false,
+        error: error?.message || "LLM API ไม่สามารถสร้างวงเม้าท์หลังจบเกมได้ในขณะนี้",
+      });
     }
   });
 
-  // Endpoint 4: Private Werewolf Pack Chat & Target Signal Alignment (when 1 wolf is Human and 1 wolf is AI)
+  // Endpoint 4: 100% Autonomous Private Werewolf Pack Chat & Target Signal Alignment
   app.post("/api/werewolf/wolf-chat", async (req, res) => {
     try {
       const {
@@ -1841,7 +1965,9 @@ ${(recentTranscript || []).slice(-18).join("\n")}
         humanWolfName,
         humanMessage,
         humanSignaledTargetId,
+        mode, // 'OPEN_NIGHT' | 'HUMAN_SIGNAL' | 'HUMAN_CHAT'
         players: reqPlayers,
+        wolfKillHistory: reqWolfHistory,
         recentWolfTranscript,
         recentPublicTranscript,
       } = req.body;
@@ -1851,6 +1977,9 @@ ${(recentTranscript || []).slice(-18).join("\n")}
       const players = Array.isArray(authSnap?.players)
         ? authSnap.players
         : reqPlayers || [];
+      const wolfKillHistory = Array.isArray(authSnap?.wolfKillHistory)
+        ? authSnap.wolfKillHistory
+        : reqWolfHistory || [];
 
       const aiWolf = players.find((p: any) => p.id === aiWolfId && p.alive && !p.isHuman);
       const alivePrey = players.filter(
@@ -1858,7 +1987,7 @@ ${(recentTranscript || []).slice(-18).join("\n")}
       );
 
       if (!aiWolf || alivePrey.length === 0) {
-        return res.json({ fallback: true });
+        return res.status(400).json({ ok: false, error: "ไม่พบเพื่อนหมาป่า AI หรือเหยื่อที่ยังมีชีวิต" });
       }
 
       const signaledPrey = humanSignaledTargetId
@@ -1872,29 +2001,38 @@ ${(recentTranscript || []).slice(-18).join("\n")}
           ? "หมาป่ามนุษย์ (หมอดูส่องเห็นเป็นชาวบ้าน)"
           : "พ่อหมาป่า";
 
-      const systemPrompt = `คุณคือ "${aiWolf.name}" เพื่อนซี้แก๊งหมาป่าที่รับบทบาท "${aiWolfThaiRole}" กำลังกระซิบคุยลับเฉพาะ 2 คนกับเพื่อนร่วมฝูง "ไอ้${humanWolfName}" ในเกม Ultimate Werewolf (ชาวบ้านคนอื่นไม่มีทางเห็นแชทนี้)
-กติกาฝูงหมาป่า:
-- ใช้ภาษาเพื่อนสนิท "กู-มึง" แบบดิบๆ กวนๆ สั้นกระชับ (1-2 ประโยค) ห้ามใช้คำสุภาพเด็ดขาด (ห้ามมี ครับ/ค่ะ/คุณ/ผม/ฉัน/นะครับ)! เช่น "จัดแม่งเลยไอ้สัส ตัวนี้ทรงหมอดูชัวร์!", "โอเคตามมึงเลย กูรอกดล็อกเป้าแล้ว!"
-- การสังหารต้องมีความเห็นตรงกันทั้ง 2 ตัว (เลือก targetId คนเดียวกัน)
-- หาก "${humanWolfName}" ส่งซิกเลือกเหยื่อแล้ว หรือเสนอชื่อใครในแชท ให้พิจารณาแล้วเลือก suggestedTargetId ที่สอดคล้องกัน (ส่วนใหญ่ให้เห็นด้วยและปรับเป้าตามเพื่อนเพื่อให้ตกลงกันได้รวดเร็ว)
-- suggestedTargetId ต้องเป็น ID ของเหยื่อที่ยังมีชีวิตอยู่ในรายชื่อเท่านั้น ห้ามเลือกหมาป่าด้วยกัน`;
+      const aiGenderThai = aiWolf.gender === "M" ? "ชาย" : "หญิง";
+
+      const systemPrompt = `คุณคือ "${aiWolf.name}" (เพศ: ${aiGenderThai} | นิสัยเฉพาะตัว: ${aiWolf.archetypeName || aiWolf.personaLabel} — ${aiWolf.personaTrait}) รับบทบาทลับ "${aiWolfThaiRole}" กำลังกระซิบวางแผนฆ่าเหยื่อแบบลับเฉพาะ 2 คนกับเพื่อนร่วมฝูงหมาป่า "${humanWolfName}" (ชาวบ้านไม่มีทางเห็นแชทนี้)
+กฎเหล็ก:
+1. คิดวิเคราะห์เลือกเหยื่อเองอย่างมีเหตุผลตามบทสนทนาในสภา (เช่น ใครพูดคมน่าจะเป็นหมอดู/บอดี้การ์ด ใครปากดีน่าเก็บก่อน) และพูดคุยให้ตรงกับเพศและนิสัยเฉพาะตัวของ "${aiWolf.name}"
+2. ใช้ภาษาเพื่อนสนิท "กู-มึง" แบบดิบๆ กวนๆ สั้นกระชับ 1-2 ประโยค ห้ามมีคำสุภาพเด็ดขาด (ห้ามมี ครับ/ค่ะ/คุณ/ผม/ฉัน/นะครับ)!
+3. การสังหารต้องตกลงเลือกเหยื่อคนเดียวกัน (suggestedTargetId ต้องเป็น ID ของเหยื่อฝั่งชาวบ้านที่ยังมีชีวิตอยู่ในรายชื่อเท่านั้น ห้ามเลือกหมาป่าด้วยกัน)
+4. ถ้า "${humanWolfName}" ส่งซิกเลือกเหยื่อหรือเสนอชื่อมาแล้ว ส่วนใหญ่ให้ตกลงตามเพื่อนหรือแสดงความเห็นสั้นๆ แล้วส่งซิกให้ตรงกันเพื่อล็อกเป้าได้ไว`;
+
+      const modeInstruction =
+        mode === "OPEN_NIGHT"
+          ? `เพิ่งเข้าสู่คืนที่ ${nightNumber || 1} — ให้ "${aiWolf.name}" เปิดแชทลับชวน "${humanWolfName}" วางแผนว่าจะเชือดใครคืนนี้ พร้อมส่งซิก suggestedTargetId แรกที่เล็งไว้`
+          : mode === "HUMAN_SIGNAL"
+          ? `"${humanWolfName}" เพิ่งกดส่งซิกเล็งเป้าหมายไปที่ ${signaledPrey ? `${signaledPrey.name} [${signaledPrey.id}]` : "เหยื่อ"} — ให้ "${aiWolf.name}" ตอบรับ/แสดงความเห็นตามนิสัยแล้วส่งซิก suggestedTargetId`
+          : `"${humanWolfName}" พิมพ์กระซิบมาว่า: "${humanMessage || ""}" — ให้ "${aiWolf.name}" ตอบกลับแบบเพื่อนร่วมฝูงพร้อมระบุ suggestedTargetId`;
 
       const userPrompt = `คืนที่ ${nightNumber || 1} — แชทลับฝูงหมาป่า
-รายชื่อเหยื่อฝั่งชาวบ้านที่ยังมีชีวิตอยู่:
-${alivePrey.map((p: any) => `- ID: ${p.id} | ชื่อ: ${p.name}`).join("\n")}
+รายชื่อเหยื่อฝั่งชาวบ้านที่ยังมีชีวิต:
+${alivePrey.map((p: any) => `- ID: ${p.id} | ชื่อ: ${p.name} (${p.gender === "M" ? "ชาย" : p.gender === "F" ? "หญิง" : "คนจริง"}${p.personaLabel ? ` · ${p.personaLabel}` : ""})`).join("\n")}
 
-เพื่อนหมาป่า "ไอ้${humanWolfName}" ส่งซิกเล็งไว้ที่: ${signaledPrey ? `${signaledPrey.name} [${signaledPrey.id}]` : "ยังไม่ได้ส่งซิก"}
-บทสนทนาลับล่าสุดของฝูงหมาป่า:
-${(recentWolfTranscript || []).slice(-6).join("\n")}
-บทสนทนาในสภาล่าสุด:
-${(recentPublicTranscript || []).slice(-6).join("\n")}
+ประวัติการล่าของฝูงหมาป่าที่ผ่านมา: ${JSON.stringify(wolfKillHistory)}
+เพื่อนหมาป่า "${humanWolfName}" กำลังส่งซิกเล็ง: ${signaledPrey ? `${signaledPrey.name} [${signaledPrey.id}]` : "ยังไม่เลือก"}
+แชทลับฝูงหมาป่าล่าสุด:
+${(recentWolfTranscript || []).slice(-8).join("\n") || "(ยังไม่มี)"}
+แชทสภาล่าสุด:
+${(recentPublicTranscript || []).slice(-10).join("\n") || "(เพิ่งคืนแรก)"}
 
-ข้อความล่าสุดจาก "ไอ้${humanWolfName}": "${humanMessage || "(ส่งซิกเลือกเป้าหมาย)"}"
-จงตอบกลับในแชทลับฝูงหมาป่าแบบเพื่อนสนิท กู-มึง (ห้ามมี ครับ/ค่ะ/คุณ/ผม/ฉัน!) พร้อมระบุ suggestedTargetId ที่ส่งซิกเลือก`;
+${modeInstruction}`;
 
       const result = await generateStructuredAIJson({
         tier: "fast",
-        maxOutputTokens: 350,
+        maxOutputTokens: 400,
         systemInstruction: systemPrompt,
         userPrompt,
         responseSchema: {
@@ -1905,21 +2043,124 @@ ${(recentPublicTranscript || []).slice(-6).join("\n")}
           },
           required: ["text", "suggestedTargetId"],
         },
-        jsonHint: `{ "text": "ข้อความกระซิบในฝูงหมาป่า 1-2 ประโยค", "suggestedTargetId": "id ของเหยื่อฝั่งชาวบ้าน" }`,
+        jsonHint: `{ "text": "ข้อความกระซิบสดๆ 1-2 ประโยคภาษา กู-มึง", "suggestedTargetId": "id ของเหยื่อฝั่งชาวบ้าน" }`,
       });
 
-      if (!result) {
-        return res.status(200).json({ fallback: true });
-      }
-
       return res.json({
-        fallback: false,
+        ok: true,
         data: result.data,
         modelUsed: result.modelUsed,
       });
     } catch (error: any) {
       console.error("AI wolf-chat error:", error?.message || error);
-      return res.status(200).json({ fallback: true, error: error?.message });
+      return res.status(503).json({
+        ok: false,
+        error: error?.message || "LLM API ไม่สามารถตอบแชทลับฝูงหมาป่าได้ในขณะนี้",
+      });
+    }
+  });
+
+  // Endpoint 5: Autonomous AI Night Action Planning (Wolves, Seer, Bodyguard pick targets via LLM)
+  app.post("/api/werewolf/night-plan", async (req, res) => {
+    try {
+      const {
+        roomId,
+        nightNumber,
+        doubleKillActive,
+        lastProtectedId,
+        players: reqPlayers,
+        seerKnowledge: reqSeerKnowledge,
+        bodyguardKnowledge: reqBgKnowledge,
+        wolfKillHistory: reqWolfHistory,
+        voteHistory: reqVoteHistory,
+        recentTranscript,
+      } = req.body;
+
+      const authSnap =
+        roomId && rooms.get(String(roomId).trim().toUpperCase())?.gameSnapshot;
+      const players = Array.isArray(authSnap?.players)
+        ? authSnap.players
+        : reqPlayers || [];
+      const seerKnowledge = Array.isArray(authSnap?.seerKnowledge)
+        ? authSnap.seerKnowledge
+        : reqSeerKnowledge || [];
+      const bodyguardKnowledge = Array.isArray(authSnap?.bodyguardKnowledge)
+        ? authSnap.bodyguardKnowledge
+        : reqBgKnowledge || [];
+      const wolfKillHistory = Array.isArray(authSnap?.wolfKillHistory)
+        ? authSnap.wolfKillHistory
+        : reqWolfHistory || [];
+      const voteHistory = Array.isArray(authSnap?.voteHistory)
+        ? authSnap.voteHistory
+        : reqVoteHistory || [];
+
+      const alive = players.filter((p: any) => p.alive);
+      const aliveWolves = alive.filter((p: any) => isWolfRole(p.role));
+      const needsAIWolf = aliveWolves.length > 0 && aliveWolves.every((w: any) => !w.isHuman);
+      const aiSeer = alive.find((p: any) => p.role === "SEER" && !p.isHuman);
+      const aiBodyguard = alive.find((p: any) => p.role === "BODYGUARD" && !p.isHuman);
+
+      if (!needsAIWolf && !aiSeer && !aiBodyguard) {
+        return res.json({ ok: true, data: {} });
+      }
+
+      const alivePrey = alive.filter((p: any) => !isWolfRole(p.role));
+      const killCount = doubleKillActive ? 2 : 1;
+
+      const systemPrompt = `คุณคือสมองวางแผนยามวิกาลของบอท AI ในเกม Ultimate Werewolf ภาษาไทย (คืนที่ ${nightNumber || 1})
+จงตัดสินใจเลือกเป้าหมายให้เฉพาะบทบาทที่เป็นบอท AI อย่างมีกลยุทธ์จากแชทและประวัติเกม:
+- ถ้าต้องเลือกเหยื่อให้ฝูงหมาป่า AI (จำนวน ${killCount} คน): เลือก ID จากรายชื่อเหยื่อฝั่งชาวบ้านที่ยังมีชีวิตเท่านั้น (ห้ามเลือกหมาป่าด้วยกัน) เล็งคนที่พูดวิเคราะห์คมๆ หรือดูน่าจะเป็นหมอดู/บอดี้การ์ด
+- ถ้าต้องเลือกเป้าหมายให้เทพพยากรณ์ AI (${aiSeer ? `${aiSeer.name} [${aiSeer.id}]` : "ไม่ต้องเลือก"}): เลือก ID ผู้เล่นที่ยังมีชีวิตที่ไม่ใช่ตัวเอง และยังไม่เคยส่องมาก่อน (ผลส่องเดิม: ${JSON.stringify(seerKnowledge)})
+- ถ้าต้องเลือกเป้าหมายให้บอดี้การ์ด AI (${aiBodyguard ? `${aiBodyguard.name} [${aiBodyguard.id}]` : "ไม่ต้องเลือก"}): เลือก ID ผู้เล่นที่ยังมีชีวิต (คุ้มกันตัวเองได้) แต่ **ห้ามซ้ำกับคนที่คุ้มกันคืนที่แล้ว** (${lastProtectedId || "ยังไม่มี"}) เลือกปกป้องคนที่เสี่ยงโดนหมาป่าเก็บที่สุด`;
+
+      const userPrompt = `คืนที่ ${nightNumber || 1} — วางแผนแอ็กชันยามวิกาลของบอท AI
+ผู้เล่นที่ยังมีชีวิต:
+${alive.map(formatPlayerProfileLine).join("\n")}
+
+เหยื่อฝั่งชาวบ้านสำหรับหมาป่า: ${alivePrey.map((p: any) => `${p.name} [${p.id}]`).join(", ")}
+ประวัติหมาป่าล่าคืนก่อน: ${JSON.stringify(wolfKillHistory)}
+ประวัติบอดี้การ์ดคุ้มกัน: ${JSON.stringify(bodyguardKnowledge)}
+ประวัติโหวต:
+${formatVoteHistoryBlock(voteHistory, [])}
+แชทล่าสุดในห้อง:
+${(recentTranscript || []).slice(-12).join("\n") || "(คืนแรก ยังไม่มีแชท)"}
+
+งานที่ต้องเลือก:
+1. wolfTargetIds: ${needsAIWolf ? `เลือก ${killCount} ID จากเหยื่อฝั่งชาวบ้าน` : "ส่งอาร์เรย์ว่าง []"}
+2. seerTargetId: ${aiSeer ? `เลือก 1 ID (ห้ามเป็น ${aiSeer.id})` : 'ส่งสตริงว่าง ""'}
+3. bodyguardTargetId: ${aiBodyguard ? `เลือก 1 ID (ห้ามเป็น ${lastProtectedId || "ไม่มี"})` : 'ส่งสตริงว่าง ""'}`;
+
+      const result = await generateStructuredAIJson({
+        tier: "fast",
+        maxOutputTokens: 350,
+        systemInstruction: systemPrompt,
+        userPrompt,
+        responseSchema: {
+          type: Type.OBJECT,
+          properties: {
+            wolfTargetIds: {
+              type: Type.ARRAY,
+              items: { type: Type.STRING },
+            },
+            seerTargetId: { type: Type.STRING },
+            bodyguardTargetId: { type: Type.STRING },
+          },
+          required: ["wolfTargetIds", "seerTargetId", "bodyguardTargetId"],
+        },
+        jsonHint: `{ "wolfTargetIds": ["id1"], "seerTargetId": "id2", "bodyguardTargetId": "id3" }`,
+      });
+
+      return res.json({
+        ok: true,
+        data: result.data,
+        modelUsed: result.modelUsed,
+      });
+    } catch (error: any) {
+      console.error("AI night-plan error:", error?.message || error);
+      return res.status(503).json({
+        ok: false,
+        error: error?.message || "LLM API ไม่สามารถวางแผนกลางคืนได้ในขณะนี้",
+      });
     }
   });
 

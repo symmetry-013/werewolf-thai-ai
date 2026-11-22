@@ -483,6 +483,24 @@ export const VillageCanvas: React.FC<VillageCanvasProps> = ({
           ctx.fillText(player.shortName, x, y);
         }
 
+        // Subtle gender badge on AI seat rim (♂ sky / ♀ rose)
+        if (!player.isHuman && player.gender && player.alive) {
+          const gx = x + r * 0.72;
+          const gy = y - r * 0.72;
+          ctx.beginPath();
+          ctx.arc(gx, gy, 8.5, 0, Math.PI * 2);
+          ctx.fillStyle = player.gender === 'M' ? '#0C4A6E' : '#831843';
+          ctx.fill();
+          ctx.lineWidth = 1.4;
+          ctx.strokeStyle = player.gender === 'M' ? '#38BDF8' : '#F472B6';
+          ctx.stroke();
+          ctx.fillStyle = player.gender === 'M' ? '#BAE6FD' : '#FBCFE8';
+          ctx.font = '700 10px "Anuphan", sans-serif';
+          ctx.textAlign = 'center';
+          ctx.textBaseline = 'middle';
+          ctx.fillText(player.gender === 'M' ? '♂' : '♀', gx, gy + 0.5);
+        }
+
         // Secret Knowledge or Public Revealed Beggar Indicator (NEVER leak other human friends' secret roles!)
         if (
           st.showTrueRoles ||
@@ -516,7 +534,7 @@ export const VillageCanvas: React.FC<VillageCanvasProps> = ({
           }
         }
 
-        // Nameplate & Persona below seat
+        // Nameplate & Persona Archetype below seat
         ctx.textBaseline = 'alphabetic';
         ctx.font = '600 11px "Anuphan", sans-serif';
         ctx.fillStyle = player.alive ? '#F1F5F9' : '#64748B';
@@ -529,6 +547,10 @@ export const VillageCanvas: React.FC<VillageCanvasProps> = ({
             ? player.revealedBeggar
               ? 'เปิดเผยการ์ดยาจกแล้ว · ไม่มีสิทธิ์โหวต'
               : player.personaLabel
+            : player.deathCause === 'WOLF_KILL'
+            ? 'โดนหมาป่าฆ่า'
+            : player.deathCause === 'DAY_EXECUTION'
+            ? 'โดนโหวตประหาร'
             : 'เสียชีวิตแล้ว',
           x,
           y + r + 27

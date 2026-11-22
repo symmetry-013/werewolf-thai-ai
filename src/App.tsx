@@ -2,8 +2,6 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   Ban,
   Check,
-  ChevronDown,
-  ChevronUp,
   Clock,
   Copy,
   Crosshair,
@@ -35,6 +33,7 @@ import {
 } from 'lucide-react';
 import {
   ABSTAIN_VOTE_ID,
+  AINightPlanOverrides,
   BodyguardRecord,
   ChatMessage,
   HumanParticipant,
@@ -43,15 +42,12 @@ import {
   PostGameReaction,
   ROLE_INFO,
   RoleType,
+  RoundVoteHistory,
   SeerRecord,
   VoteRecord,
+  WolfKillRecord,
   checkWinCondition,
   createInitialPlayers,
-  generateLocalDayDiscussion,
-  generateLocalPostGameDebrief,
-  generateLocalReplyToHuman,
-  generateLocalVotes,
-  generateLocalWolfPartnerReply,
   isWerewolfTeam,
   resolveNightPhase,
 } from './data/werewolfEngine';
@@ -68,6 +64,7 @@ import {
   AnnouncementBannerData,
   AnnouncementBannerOverlay,
 } from './components/AnnouncementBannerOverlay';
+import { LineGroupChatFeed } from './components/LineGroupChatFeed';
 import { soundFX } from './utils/sound';
 
 type ShellState =
@@ -206,13 +203,19 @@ export default function App() {
   const [lastProtectedId, setLastProtectedId] = useState<string | null>(null);
   const [seerKnowledge, setSeerKnowledge] = useState<SeerRecord[]>([]);
   const [bodyguardKnowledge, setBodyguardKnowledge] = useState<BodyguardRecord[]>([]);
+  const [wolfKillHistory, setWolfKillHistory] = useState<WolfKillRecord[]>([]);
+  const [voteHistory, setVoteHistory] = useState<RoundVoteHistory[]>([]);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [votes, setVotes] = useState<VoteRecord[]>([]);
 
   const [humanInput, setHumanInput] = useState<string>('');
   const [isGeneratingAI, setIsGeneratingAI] = useState<boolean>(false);
+  const [aiError, setAiError] = useState<string | null>(null);
   const [postGameReactions, setPostGameReactions] = useState<PostGameReaction[]>([]);
   const [isGeneratingPostGame, setIsGeneratingPostGame] = useState<boolean>(false);
+  const [postGameError, setPostGameError] = useState<string | null>(null);
+  const pendingVoteRetryRef = useRef<Record<string, string> | null>(null);
+  const lastPostGameParamsRef = useRef<any>(null);
 
   // Private Werewolf Pack Chat & Target Signaling (ONLY visible to Werewolves)
   const [wolfMessages, setWolfMessages] = useState<ChatMessage[]>([]);
@@ -231,7 +234,11 @@ export default function App() {
 
   const [activeSpeakerId, setActiveSpeakerId] = useState<string | null>(null);
   const [showRoleCardModal, setShowRoleCardModal] = useState<boolean>(false);
-  const [showMobilePlayers, setShowMobilePlayers] = useState<boolean>(false);
+  const [lineDarkMode, setLineDarkMode] = useState<boolean>(false);
+  const [mobileActiveTab, setMobileActiveTab] = useState<'PLAYERS' | 'CHAT' | 'ROLE'>('CHAT');
+  const [unreadPublicCount, setUnreadPublicCount] = useState<number>(0);
+  const [typingBotId, setTypingBotId] = useState<string | null>(null);
+  const [revealTabRoleCard, setRevealTabRoleCard] = useState<boolean>(false);
   const [roleCardImgError, setRoleCardImgError] = useState<boolean>(false);
   const [muted, setMuted] = useState<boolean>(false);
   const [impactTrigger, setImpactTrigger] = useState<number>(0);
@@ -252,6 +259,11 @@ export default function App() {
   phaseReadyIdsRef.current = phaseReadyIds;
   const activeChatTabRef = useRef<'PUBLIC' | 'WOLF'>(activeChatTab);
   activeChatTabRef.current = activeChatTab;
+  const mobileActiveTabRef = useRef<'PLAYERS' | 'CHAT' | 'ROLE'>(mobileActiveTab);
+  mobileActiveTabRef.current = mobileActiveTab;
+  const prevVisibleMsgCountRef = useRef<number>(0);
+  const announcedReadyKeysRef = useRef<Set<string>>(new Set());
+  const gmTeasedPhaseKeyRef = useRef<string>('');
   const aiWolfOpenedNightRef = useRef<number>(0);
   const [deathOverlay, setDeathOverlay] = useState<DeathAnimationType | null>(null);
   const [bodyguardOverlay, setBodyguardOverlay] =
@@ -477,11 +489,16 @@ export default function App() {
               setLastProtectedId(snap.lastProtectedId || null);
               setSeerKnowledge(snap.seerKnowledge || []);
               setBodyguardKnowledge(snap.bodyguardKnowledge || []);
+              setWolfKillHistory(snap.wolfKillHistory || []);
+              setVoteHistory(snap.voteHistory || []);
               setMessages(snap.messages || []);
               setVotes(snap.votes || []);
               setWinSummary(snap.winSummary || { winner: null, reasonThai: '' });
               setPostGameReactions([]);
               setIsGeneratingPostGame(false);
+              setAiError(null);
+              setPostGameError(null);
+              pendingVoteRetryRef.current = null;
               setWolfMessages([]);
               setWolfSignals({});
               setWolfConsensusError(null);
@@ -582,6 +599,12 @@ export default function App() {
               if (Array.isArray(snap.seerKnowledge)) setSeerKnowledge(snap.seerKnowledge);
               if (Array.isArray(snap.bodyguardKnowledge)) {
                 setBodyguardKnowledge(snap.bodyguardKnowledge);
+              }
+              if (Array.isArray(snap.wolfKillHistory)) {
+                setWolfKillHistory(snap.wolfKillHistory);
+              }
+              if (Array.isArray(snap.voteHistory)) {
+                setVoteHistory(snap.voteHistory);
               }
               if (Array.isArray(snap.messages)) setMessages(snap.messages);
               if (Array.isArray(snap.votes)) setVotes(snap.votes);
@@ -1067,14 +1090,15 @@ export default function App() {
     });
 
     const night1PromptText =
-      `เข้าสู่ คืนที่ 1 (Night 1): ความมืดมิดเข้าปกคลุมหมู่บ้านจันทร์ทมิฬ ขอให้ทุกคนหลับตาลง...\n` +
-      `โปรดเลือกแอ็กชันประจำบทบาทของคุณในยามวิกาล`;
+      `🌙 เข้าสู่ยามวิกาล คืนที่ 1 แล้ว! หลับตาซะพวกชาวบ้าน\n` +
+      `ส่วนผู้ที่มีบทบาทลับ (หมาป่า · หมอดู · บอดี้การ์ด) ตื่นขึ้นมาทำหน้าที่ของตัวเองได้เลย`;
 
     const initialMsgs: ChatMessage[] = [
       {
         id: `msg-intro-${Date.now()}-1`,
         senderId: 'moderator',
-        senderName: 'ผู้ดำเนินเกม (Moderator)',
+        senderName: 'ผู้คุมเกม (GM)',
+        gmType: 'PHASE',
         text: introText,
         phaseLabel: `เริ่มเกม · ${freshPlayers.length} ผู้เล่น`,
         timestamp: formatTime(),
@@ -1082,16 +1106,18 @@ export default function App() {
       {
         id: `msg-intro-${Date.now()}-2`,
         senderId: 'moderator',
-        senderName: 'ผู้ดำเนินเกม (Moderator)',
+        senderName: 'ผู้คุมเกม (GM)',
+        gmType: 'EVENT',
         text: rosterText,
-        phaseLabel: 'รายชื่อผู้เล่นในสภา',
+        phaseLabel: 'รายชื่อสมาชิกในกลุ่ม',
         timestamp: formatTime(),
       },
       ...secretRoleMessages,
       {
         id: `msg-night1-${Date.now()}-4`,
         senderId: 'moderator',
-        senderName: 'ผู้ดำเนินเกม (Moderator)',
+        senderName: 'ผู้คุมเกม (GM)',
+        gmType: 'PHASE',
         text: night1PromptText,
         phaseLabel: 'คืนที่ 1 · ยามวิกาล',
         timestamp: formatTime(),
@@ -1112,15 +1138,26 @@ export default function App() {
     setLastProtectedId(null);
     setSeerKnowledge([]);
     setBodyguardKnowledge([]);
+    setWolfKillHistory([]);
+    setVoteHistory([]);
     setVotes([]);
     setWinSummary({ winner: null, reasonThai: '' });
     setPostGameReactions([]);
     setIsGeneratingPostGame(false);
+    setAiError(null);
+    setPostGameError(null);
+    pendingVoteRetryRef.current = null;
+    lastPostGameParamsRef.current = null;
     setWolfMessages([]);
     setWolfSignals({});
     setWolfConsensusError(null);
     setActiveChatTab('PUBLIC');
+    setMobileActiveTab('CHAT');
+    setUnreadPublicCount(0);
     setUnreadWolfCount(0);
+    setRevealTabRoleCard(false);
+    announcedReadyKeysRef.current.clear();
+    gmTeasedPhaseKeyRef.current = '';
     setPhaseDeadlineAt(null);
     aiWolfOpenedNightRef.current = 0;
     setDeathOverlay(null);
@@ -1145,6 +1182,8 @@ export default function App() {
         lastProtectedId: null,
         seerKnowledge: [],
         bodyguardKnowledge: [],
+        wolfKillHistory: [],
+        voteHistory: [],
         messages: initialMsgs,
         votes: [],
         winSummary: { winner: null, reasonThai: '' },
@@ -1163,6 +1202,8 @@ export default function App() {
       lastProtectedId: string | null;
       seerKnowledge: SeerRecord[];
       bodyguardKnowledge: BodyguardRecord[];
+      wolfKillHistory?: WolfKillRecord[];
+      voteHistory?: RoundVoteHistory[];
       messages: ChatMessage[];
       votes: VoteRecord[];
       winSummary: { winner: 'VILLAGE' | 'WEREWOLF' | null; reasonThai: string };
@@ -1183,7 +1224,7 @@ export default function App() {
     [sendWsMessage]
   );
 
-  // Trigger Post-Game AI Debrief (candid Thai praise, roasting, shock after all roles are revealed!)
+  // Trigger 100% Autonomous Live LLM Post-Game Debrief (no hardcoded templates)
   const triggerPostGameDebrief = useCallback(
     async (params: {
       winner: 'VILLAGE' | 'WEREWOLF';
@@ -1196,6 +1237,8 @@ export default function App() {
       finalLastProtected: string | null;
       finalSeer: SeerRecord[];
       finalBg: BodyguardRecord[];
+      finalWolfHistory?: WolfKillRecord[];
+      finalVoteHistory?: RoundVoteHistory[];
     }) => {
       const aiList = params.finalPlayers.filter((p) => !p.isHuman);
       if (aiList.length === 0) {
@@ -1204,10 +1247,10 @@ export default function App() {
         return;
       }
 
+      lastPostGameParamsRef.current = params;
       setIsGeneratingPostGame(true);
+      setPostGameError(null);
       setPostGameReactions([]);
-
-      let reactions: PostGameReaction[] = [];
 
       try {
         const recentTranscript = params.finalMessages
@@ -1227,98 +1270,91 @@ export default function App() {
             recentTranscript,
             seerKnowledge: params.finalSeer,
             bodyguardKnowledge: params.finalBg,
+            wolfKillHistory: params.finalWolfHistory ?? wolfKillHistory,
+            voteHistory: params.finalVoteHistory ?? voteHistory,
           }),
         });
         const json = await res.json();
         if (
-          !json.fallback &&
-          Array.isArray(json.data?.reactions) &&
-          json.data.reactions.length > 0
+          !res.ok ||
+          !json.ok ||
+          !Array.isArray(json.data?.reactions) ||
+          json.data.reactions.length === 0
         ) {
-          const validSentiments = new Set(['praise', 'roast', 'shock', 'proud']);
-          reactions = json.data.reactions
-            .map((item: any) => {
-              const matched = params.finalPlayers.find(
-                (p) =>
-                  !p.isHuman &&
-                  (p.id === item.speakerId || p.name.includes(item.speakerName))
-              );
-              if (!matched) return null;
-              const sentiment = validSentiments.has(item.sentiment)
-                ? (item.sentiment as PostGameReaction['sentiment'])
-                : 'praise';
-              return {
-                speakerId: matched.id,
-                speakerName: matched.name,
-                role: matched.role,
-                alive: matched.alive,
-                moodTag: item.moodTag || 'เปิดใจหลังเกม',
-                sentiment,
-                text: item.text,
-              } as PostGameReaction;
-            })
-            .filter(Boolean) as PostGameReaction[];
+          throw new Error(json.error || 'ไม่สามารถโหลดบทสนทนาหลังจบเกมจาก LLM ได้');
         }
-      } catch {
-        // Fallback to local engine
+
+        const validSentiments = new Set(['praise', 'roast', 'shock', 'proud']);
+        const reactions: PostGameReaction[] = json.data.reactions
+          .map((item: any) => {
+            const matched = params.finalPlayers.find(
+              (p) =>
+                !p.isHuman &&
+                (p.id === item.speakerId || p.name.includes(item.speakerName))
+            );
+            if (!matched) return null;
+            const sentiment = validSentiments.has(item.sentiment)
+              ? (item.sentiment as PostGameReaction['sentiment'])
+              : 'roast';
+            return {
+              speakerId: matched.id,
+              speakerName: matched.name,
+              role: matched.role,
+              alive: matched.alive,
+              gender: matched.gender,
+              archetypeName: matched.personaLabel,
+              moodTag: item.moodTag || 'เปิดใจหลังเกม',
+              sentiment,
+              text: item.text,
+            } as PostGameReaction;
+          })
+          .filter(Boolean) as PostGameReaction[];
+
+        setPostGameReactions(reactions);
+        setIsGeneratingPostGame(false);
+
+        const debriefChatMsg: ChatMessage = {
+          id: `postgame-debrief-${Date.now()}`,
+          senderId: 'moderator',
+          senderName: 'ผู้คุมเกม (GM) · วงเม้าท์หลังเปิดการ์ด',
+          gmType: 'EVENT',
+          text: reactions
+            .map(
+              (r) =>
+                `• ${r.speakerName} [${ROLE_INFO[r.role].thaiName} · ${r.moodTag}]: "${r.text}"`
+            )
+            .join('\n'),
+          phaseLabel: 'ความในใจหลังจบเกม',
+          timestamp: formatTime(),
+        };
+
+        const msgsWithDebrief = [...params.finalMessages, debriefChatMsg];
+        setMessages(msgsWithDebrief);
+
+        broadcastGameState({
+          players: params.finalPlayers,
+          phase: 'GAME_OVER',
+          dayCount: params.finalDayCount,
+          doubleKillNextNight: params.finalDoubleKill,
+          lastProtectedId: params.finalLastProtected,
+          seerKnowledge: params.finalSeer,
+          bodyguardKnowledge: params.finalBg,
+          wolfKillHistory: params.finalWolfHistory ?? wolfKillHistory,
+          voteHistory: params.finalVoteHistory ?? voteHistory,
+          messages: msgsWithDebrief,
+          votes: params.finalVotes,
+          winSummary: { winner: params.winner, reasonThai: params.reasonThai },
+          postGameReactions: reactions,
+          shellState: 'GAME_OVER',
+        });
+      } catch (err: any) {
+        setIsGeneratingPostGame(false);
+        setPostGameError(
+          err?.message || 'LLM API ขัดข้องชั่วคราว กดปุ่มลองใหม่เพื่อเรียกบอทมาเผากันหลังจบเกม'
+        );
       }
-
-      // Ensure every AI player gets a reaction (fill any missing or use local fallback)
-      const fallbackAll = generateLocalPostGameDebrief({
-        winner: params.winner,
-        players: params.finalPlayers,
-        dayCount: params.finalDayCount,
-        seerKnowledge: params.finalSeer,
-        bodyguardKnowledge: params.finalBg,
-      });
-
-      if (reactions.length === 0) {
-        reactions = fallbackAll;
-      } else {
-        const existingIds = new Set(reactions.map((r) => r.speakerId));
-        for (const fb of fallbackAll) {
-          if (!existingIds.has(fb.speakerId)) {
-            reactions.push(fb);
-          }
-        }
-      }
-
-      setPostGameReactions(reactions);
-      setIsGeneratingPostGame(false);
-
-      const debriefChatMsg: ChatMessage = {
-        id: `postgame-debrief-${Date.now()}`,
-        senderId: 'moderator',
-        senderName: 'วงเม้าท์หลังเปิดการ์ด (AI Debrief)',
-        text: reactions
-          .map(
-            (r) =>
-              `• ${r.speakerName} [${ROLE_INFO[r.role].thaiName} · ${r.moodTag}]: "${r.text}"`
-          )
-          .join('\n'),
-        phaseLabel: 'ความในใจหลังจบเกม',
-        timestamp: formatTime(),
-      };
-
-      const msgsWithDebrief = [...params.finalMessages, debriefChatMsg];
-      setMessages(msgsWithDebrief);
-
-      broadcastGameState({
-        players: params.finalPlayers,
-        phase: 'GAME_OVER',
-        dayCount: params.finalDayCount,
-        doubleKillNextNight: params.finalDoubleKill,
-        lastProtectedId: params.finalLastProtected,
-        seerKnowledge: params.finalSeer,
-        bodyguardKnowledge: params.finalBg,
-        messages: msgsWithDebrief,
-        votes: params.finalVotes,
-        winSummary: { winner: params.winner, reasonThai: params.reasonThai },
-        postGameReactions: reactions,
-        shellState: 'GAME_OVER',
-      });
     },
-    [roomId, broadcastGameState]
+    [roomId, broadcastGameState, wolfKillHistory, voteHistory]
   );
 
   const visibleMessages = useMemo(() => {
@@ -1332,14 +1368,164 @@ export default function App() {
 
   useEffect(() => {
     chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [visibleMessages, isGeneratingAI]);
+  }, [visibleMessages, isGeneratingAI, mobileActiveTab]);
+
+  // Track unread public messages when user is on Mobile Tab 1 or Tab 3
+  useEffect(() => {
+    const prev = prevVisibleMsgCountRef.current;
+    const curr = visibleMessages.length;
+    prevVisibleMsgCountRef.current = curr;
+    if (curr > prev && mobileActiveTabRef.current !== 'CHAT') {
+      setUnreadPublicCount((c) => c + (curr - prev));
+    }
+  }, [visibleMessages.length]);
 
   useEffect(() => {
-    if (activeChatTab === 'WOLF') {
-      wolfChatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+    if (mobileActiveTab === 'CHAT') {
+      setUnreadPublicCount(0);
+    }
+    if (mobileActiveTab === 'ROLE' && amWerewolf) {
       setUnreadWolfCount(0);
     }
-  }, [wolfMessages, isGeneratingWolfAI, activeChatTab]);
+  }, [mobileActiveTab, amWerewolf]);
+
+  useEffect(() => {
+    if (activeChatTab === 'WOLF' || mobileActiveTab === 'ROLE') {
+      wolfChatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+      if (activeChatTab === 'WOLF') setUnreadWolfCount(0);
+    }
+  }, [wolfMessages, isGeneratingWolfAI, activeChatTab, mobileActiveTab]);
+
+  // Format informal Thai friend callout for LINE typing indicator & GM Ready pills (e.g. "ไอ้บอส", "มิ้นท์")
+  const formatInformalThaiCall = useCallback((p: Player): string => {
+    if (!p.isHuman && p.gender === 'M') {
+      return p.shortName.startsWith('ไอ้') ? p.shortName : `ไอ้${p.shortName}`;
+    }
+    return p.shortName;
+  }, []);
+
+  // Rotate realistic LINE-style typing indicator ("ไอ้บอส กำลังพิมพ์...") while LLM is generating
+  useEffect(() => {
+    if (!isGeneratingAI) {
+      setTypingBotId(null);
+      return;
+    }
+    const livingAIs = players.filter((p) => p.alive && !p.isHuman);
+    if (livingAIs.length === 0) {
+      setTypingBotId(null);
+      return;
+    }
+    const pickRandom = () => {
+      const next = livingAIs[Math.floor(Math.random() * livingAIs.length)];
+      setTypingBotId(next.id);
+    };
+    pickRandom();
+    const interval = window.setInterval(pickRandom, 1850);
+    return () => window.clearInterval(interval);
+  }, [isGeneratingAI, players]);
+
+  const typingBotPlayer = useMemo(
+    () => (typingBotId ? players.find((p) => p.id === typingBotId) || null : null),
+    [typingBotId, players]
+  );
+
+  const typingBotName = useMemo(
+    () => (typingBotPlayer ? formatInformalThaiCall(typingBotPlayer) : null),
+    [typingBotPlayer, formatInformalThaiCall]
+  );
+
+  // Official Game Master (GM) Ready Pill Notifications in LINE Group Chat
+  useEffect(() => {
+    if (shellState !== 'PLAYING') return;
+    if (phase !== 'DAY_DISCUSSION' && phase !== 'DAY_RESULT') return;
+    if (phaseReadyIds.length === 0) return;
+
+    const totalRequired = requiredPhaseReadyPlayers.length;
+    const newlyReadyMessages: ChatMessage[] = [];
+    const actionLabel =
+      phase === 'DAY_DISCUSSION' ? 'กดพร้อมโหวตแล้ว' : 'กดพร้อมเข้ากลางคืนแล้ว';
+
+    phaseReadyIds.forEach((pid, idx) => {
+      const dedupeKey = `${phase}-${dayCount}-${pid}`;
+      if (announcedReadyKeysRef.current.has(dedupeKey)) return;
+      announcedReadyKeysRef.current.add(dedupeKey);
+
+      const p = players.find((pl) => pl.id === pid);
+      if (!p) return;
+
+      const countAtMoment = Math.min(totalRequired, idx + 1);
+      newlyReadyMessages.push({
+        id: `gm-ready-${phase}-${dayCount}-${pid}-${Date.now()}`,
+        senderId: 'moderator',
+        senderName: 'ผู้คุมเกม (GM)',
+        gmType: 'READY',
+        text: `✅ ${formatInformalThaiCall(p)} ${actionLabel} (${countAtMoment}/${totalRequired})`,
+        phaseLabel: phase === 'DAY_DISCUSSION' ? `วันที่ ${dayCount}` : `ก่อนคืนที่ ${dayCount + 1}`,
+        timestamp: formatTime(),
+      });
+    });
+
+    if (newlyReadyMessages.length > 0) {
+      setMessages((prev) => [...prev, ...newlyReadyMessages]);
+    }
+  }, [
+    shellState,
+    phase,
+    dayCount,
+    phaseReadyIds,
+    players,
+    requiredPhaseReadyPlayers.length,
+    formatInformalThaiCall,
+  ]);
+
+  // Official Game Master (GM) Witty Teasing Nudges when players argue or hesitate too long
+  useEffect(() => {
+    if (shellState !== 'PLAYING') return;
+    if (phase !== 'DAY_DISCUSSION' && phase !== 'DAY_VOTING' && phase !== 'DAY_RESULT') return;
+
+    const phaseKey = `${dayCount}-${phase}`;
+    if (gmTeasedPhaseKeyRef.current === phaseKey) return;
+
+    const delayMs =
+      phase === 'DAY_VOTING' ? 22000 : phase === 'DAY_DISCUSSION' ? 30000 : 35000;
+
+    const timer = window.setTimeout(() => {
+      if (gmTeasedPhaseKeyRef.current === phaseKey) return;
+      gmTeasedPhaseKeyRef.current = phaseKey;
+
+      const pool =
+        phase === 'DAY_DISCUSSION'
+          ? [
+              '🎙️ เถียงกันให้พอ เหลือเวลาอีกไม่มาก รีบสรุปแล้วกด "พร้อมโหวต" กันได้แล้วพวกเอ็ง!',
+              '🎙️ โอ้โห สาดโคลนกันยับแต่ยังไม่กดพร้อมโหวตเลยนะ ระวังหมาป่ามันนั่งขำอยู่ในกลุ่ม!',
+              '🎙️ จะคุยยันเช้าอีกรอบมั้ยพวกเอ็ง? รีบกดพร้อมโหวตได้แล้ว เดี๋ยวคนคุมเกมหลับก่อน!',
+            ]
+          : phase === 'DAY_VOTING'
+          ? [
+              '🎙️ ลังเลอะไรกันนักหนา รีบจิ้มชื่อโหวตประหารได้แล้ว! ช้าเดี๋ยวหมาป่ากินเรียบทั้งหมู่บ้านนะ!',
+              '🎙️ กดโหวตเลยพวกเอ็ง อย่ามัวแต่นั่งจ้องหน้ากัน ถ้าไม่มั่นใจก็กด "งดออกเสียง" ไป!',
+            ]
+          : [
+              '🎙️ โหวตจบแล้วนะพวกเอ็ง จะเม้าท์ต่ออีกนานมั้ย รีบกดพร้อมเข้ากลางคืนได้แล้ว ดวงจันทร์มารอแล้ว!',
+              '🎙️ หมาป่ามันลับเล็บรอแล้วนะ ใครคุยเคลียร์ใจเสร็จแล้วก็กด "พร้อมเข้าสู่กลางคืน" ซะ!',
+            ];
+
+      const chosenLine = pool[Math.floor(Math.random() * pool.length)];
+      const gmTeaseMsg: ChatMessage = {
+        id: `gm-tease-${phaseKey}-${Date.now()}`,
+        senderId: 'moderator',
+        senderName: 'ผู้คุมเกม (GM)',
+        gmType: 'TEASE',
+        text: chosenLine,
+        phaseLabel: `วันที่ ${dayCount} · เตือนจาก GM`,
+        timestamp: formatTime(),
+      };
+      setMessages((prev) => [...prev, gmTeaseMsg]);
+      soundFX.playMessagePop(true);
+    }, delayMs);
+
+    return () => window.clearTimeout(timer);
+  }, [shellState, phase, dayCount]);
 
   // 5-minute countdown clock during DAY_RESULT (auto-enters Night at 00:00 if not skipped early by unanimous Ready)
   useEffect(() => {
@@ -1516,7 +1702,7 @@ export default function App() {
     [myPlayer, phase, lastProtectedId]
   );
 
-  // AI fellow wolf response in Private Wolf Chat + target signal alignment (when 1 wolf is Human & 1 is AI)
+  // AI fellow wolf response in Private Wolf Chat + target signal alignment (100% live LLM, zero hardcoded templates)
   const triggerAIWolfPartnerReply = useCallback(
     async (
       mode: 'OPEN_NIGHT' | 'HUMAN_SIGNAL' | 'HUMAN_CHAT',
@@ -1525,50 +1711,7 @@ export default function App() {
     ) => {
       if (!myPlayer || !livingFellowWolf || livingFellowWolf.isHuman) return;
 
-      if (mode === 'OPEN_NIGHT') {
-        const localOpen = generateLocalWolfPartnerReply({
-          aiWolf: livingFellowWolf,
-          humanWolfName: myPlayer.shortName,
-          players,
-          nightNumber: dayCount,
-          mode: 'OPEN_NIGHT',
-        });
-        const aiWolfMsg: ChatMessage = {
-          id: `wolf-open-${dayCount}-${Date.now()}`,
-          senderId: livingFellowWolf.id,
-          senderName: `${livingFellowWolf.name} (${ROLE_INFO[livingFellowWolf.role].thaiName})`,
-          text: localOpen.text,
-          tone: 'กระซิบในฝูงหมาป่า',
-          phaseLabel: `คืนที่ ${dayCount} · ฝูงหมาป่า`,
-          timestamp: formatTime(),
-        };
-        setWolfMessages((prev) => [...prev, aiWolfMsg]);
-        if (activeChatTabRef.current !== 'WOLF') {
-          setUnreadWolfCount((c) => c + 1);
-        }
-        if (localOpen.suggestedTargetId) {
-          setWolfSignals((prev) => ({
-            ...prev,
-            [livingFellowWolf.id]: { primary: localOpen.suggestedTargetId },
-          }));
-          sendWsMessage({
-            type: 'WOLF_SIGNAL',
-            playerId: livingFellowWolf.id,
-            wolfSignal: { primary: localOpen.suggestedTargetId },
-          });
-        }
-        sendWsMessage({
-          type: 'WOLF_CHAT',
-          playerId: livingFellowWolf.id,
-          wolfMessage: aiWolfMsg,
-        });
-        return;
-      }
-
       setIsGeneratingWolfAI(true);
-      let replyText = '';
-      let suggestedTargetId: string | null = humanTargetId;
-
       try {
         const res = await fetch('/api/werewolf/wolf-chat', {
           method: 'POST',
@@ -1576,92 +1719,88 @@ export default function App() {
           body: JSON.stringify({
             roomId,
             nightNumber: dayCount,
+            mode,
             aiWolfId: livingFellowWolf.id,
             humanWolfName: myPlayer.shortName,
             humanMessage: humanMsgText,
             humanSignaledTargetId: humanTargetId,
             players,
+            wolfKillHistory,
             recentWolfTranscript: wolfMessages
-              .slice(-6)
+              .slice(-8)
               .map((m) => `${m.senderName}: ${m.text}`),
             recentPublicTranscript: messages
               .filter((m) => !m.isSecret)
-              .slice(-6)
+              .slice(-10)
               .map((m) => `${m.senderName}: ${m.text}`),
           }),
         });
         const json = await res.json();
-        if (!json.fallback && json.data?.text) {
-          replyText = json.data.text;
-          const validTarget = players.find(
-            (p) =>
-              p.alive &&
-              !isWerewolfTeam(p.role) &&
-              p.id === json.data.suggestedTargetId
-          );
-          if (validTarget) {
-            suggestedTargetId = validTarget.id;
-          }
+        if (!res.ok || !json.ok || !json.data?.text) {
+          throw new Error(json.error || 'LLM API ไม่สามารถตอบแชทลับฝูงหมาป่าได้');
         }
-      } catch {
-        // Fallback below
-      }
 
-      if (!replyText) {
-        const localRes = generateLocalWolfPartnerReply({
-          aiWolf: livingFellowWolf,
-          humanWolfName: myPlayer.shortName,
-          players,
-          humanMessage: humanMsgText,
-          humanSignaledTargetId: humanTargetId,
-          nightNumber: dayCount,
-          mode,
-        });
-        replyText = localRes.text;
-        suggestedTargetId = localRes.suggestedTargetId;
-      }
+        const replyText = String(json.data.text).trim();
+        let suggestedTargetId: string | null = null;
+        const validTarget = players.find(
+          (p) =>
+            p.alive &&
+            !isWerewolfTeam(p.role) &&
+            p.id === json.data.suggestedTargetId
+        );
+        if (validTarget) {
+          suggestedTargetId = validTarget.id;
+        } else if (humanTargetId) {
+          suggestedTargetId = humanTargetId;
+        }
 
-      // If human explicitly signaled a target at Night, ensure AI partner aligns when agreeing
-      if (mode === 'HUMAN_SIGNAL' && humanTargetId) {
-        suggestedTargetId = humanTargetId;
-      }
+        // If human explicitly signaled a target at Night, allow AI partner to align if no alternate was specified
+        if (mode === 'HUMAN_SIGNAL' && humanTargetId && !suggestedTargetId) {
+          suggestedTargetId = humanTargetId;
+        }
 
-      setIsGeneratingWolfAI(false);
+        const aiMsg: ChatMessage = {
+          id: `wolf-ai-${mode.toLowerCase()}-${dayCount}-${Date.now()}`,
+          senderId: livingFellowWolf.id,
+          senderName: `${livingFellowWolf.name} (${ROLE_INFO[livingFellowWolf.role].thaiName})`,
+          senderGender: livingFellowWolf.gender,
+          text: replyText,
+          tone: 'กระซิบในฝูงหมาป่า',
+          phaseLabel:
+            phase === 'NIGHT_ACTION'
+              ? `คืนที่ ${dayCount} · ฝูงหมาป่า`
+              : `วันที่ ${dayCount} · ฝูงหมาป่า`,
+          timestamp: formatTime(),
+        };
+        setWolfMessages((prev) => [...prev, aiMsg]);
+        if (activeChatTabRef.current !== 'WOLF') {
+          setUnreadWolfCount((c) => c + 1);
+        }
+        soundFX.playMessagePop(false);
 
-      const aiMsg: ChatMessage = {
-        id: `wolf-ai-${Date.now()}`,
-        senderId: livingFellowWolf.id,
-        senderName: `${livingFellowWolf.name} (${ROLE_INFO[livingFellowWolf.role].thaiName})`,
-        text: replyText,
-        tone: 'กระซิบในฝูงหมาป่า',
-        phaseLabel:
-          phase === 'NIGHT_ACTION'
-            ? `คืนที่ ${dayCount} · ฝูงหมาป่า`
-            : `วันที่ ${dayCount} · ฝูงหมาป่า`,
-        timestamp: formatTime(),
-      };
-      setWolfMessages((prev) => [...prev, aiMsg]);
-      if (activeChatTabRef.current !== 'WOLF') {
-        setUnreadWolfCount((c) => c + 1);
-      }
-      soundFX.playMessagePop(false);
-
-      if (suggestedTargetId && phase === 'NIGHT_ACTION') {
-        setWolfSignals((prev) => ({
-          ...prev,
-          [livingFellowWolf.id]: { primary: suggestedTargetId },
-        }));
+        if (suggestedTargetId && phase === 'NIGHT_ACTION') {
+          setWolfSignals((prev) => ({
+            ...prev,
+            [livingFellowWolf.id]: { primary: suggestedTargetId },
+          }));
+          sendWsMessage({
+            type: 'WOLF_SIGNAL',
+            playerId: livingFellowWolf.id,
+            wolfSignal: { primary: suggestedTargetId },
+          });
+        }
         sendWsMessage({
-          type: 'WOLF_SIGNAL',
+          type: 'WOLF_CHAT',
           playerId: livingFellowWolf.id,
-          wolfSignal: { primary: suggestedTargetId },
+          wolfMessage: aiMsg,
         });
+      } catch (err: any) {
+        setAiError(
+          `แชทลับหมาป่าเชื่อมต่อ LLM ไม่สำเร็จ: ${err?.message || 'โปรดลองส่งข้อความหรือส่งซิกใหม่อีกครั้ง'}`
+        );
+      } finally {
+        setIsGeneratingWolfAI(false);
       }
-      sendWsMessage({
-        type: 'WOLF_CHAT',
-        playerId: livingFellowWolf.id,
-        wolfMessage: aiMsg,
-      });
     },
     [
       myPlayer,
@@ -1669,6 +1808,7 @@ export default function App() {
       players,
       dayCount,
       roomId,
+      wolfKillHistory,
       wolfMessages,
       messages,
       phase,
@@ -1810,11 +1950,13 @@ export default function App() {
       victimPlayers: Player[],
       updatedSeer: SeerRecord[],
       updatedBg: BodyguardRecord[],
-      cubRageWasUsed: boolean,
+      _cubRageWasUsed: boolean,
       baseMessages: ChatMessage[],
       currentDoubleKill: boolean,
       currentLastProtected: string | null,
-      lastRoundVotes: VoteRecord[]
+      lastRoundVotes: VoteRecord[],
+      updatedWolfHistory?: WolfKillRecord[],
+      currentVoteHistory?: RoundVoteHistory[]
     ) => {
       const remainingAliveAI = updatedPlayers.filter((p) => p.alive && !p.isHuman);
       if (remainingAliveAI.length === 0) {
@@ -1826,6 +1968,8 @@ export default function App() {
           lastProtectedId: currentLastProtected,
           seerKnowledge: updatedSeer,
           bodyguardKnowledge: updatedBg,
+          wolfKillHistory: updatedWolfHistory ?? wolfKillHistory,
+          voteHistory: currentVoteHistory ?? voteHistory,
           messages: baseMessages,
           votes: lastRoundVotes,
           winSummary: { winner: null, reasonThai: '' },
@@ -1835,6 +1979,7 @@ export default function App() {
       }
 
       setIsGeneratingAI(true);
+      setAiError(null);
       let aiLines: {
         speakerId: string;
         speakerName: string;
@@ -1843,6 +1988,11 @@ export default function App() {
       }[] = [];
 
       try {
+        const recentTranscript = baseMessages
+          .filter((m) => !m.isSecret && m.senderId !== 'secret')
+          .slice(-15)
+          .map((m) => `${m.senderName}: ${m.text}`);
+
         const res = await fetch('/api/werewolf/discuss', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -1853,35 +2003,31 @@ export default function App() {
             nightVictimNames: victimPlayers.map((v) => v.name),
             seerKnowledge: updatedSeer,
             bodyguardKnowledge: updatedBg,
+            wolfKillHistory: updatedWolfHistory ?? wolfKillHistory,
+            voteHistory: currentVoteHistory ?? voteHistory,
+            doubleKillNextNight: currentDoubleKill,
+            recentTranscript,
             previousVotes: lastRoundVotes,
             mode: 'INITIAL_DAY',
           }),
         });
         const json = await res.json();
         if (
-          !json.fallback &&
+          res.ok &&
+          json.ok &&
           Array.isArray(json.data?.messages) &&
           json.data.messages.length > 0
         ) {
           aiLines = json.data.messages;
+        } else {
+          setAiError(json.error || 'LLM API ตอบกลับไม่สำเร็จ กดให้บอทคุยต่ออีกครั้งได้เลย');
         }
-      } catch {
-        // Fallback to local analytical engine
-      }
-
-      if (aiLines.length === 0) {
-        aiLines = generateLocalDayDiscussion({
-          dayNumber: currentDay,
-          players: updatedPlayers,
-          victimPlayers,
-          seerKnowledge: updatedSeer,
-          bodyguardKnowledge: updatedBg,
-          cubRageTriggeredLastRound: cubRageWasUsed,
-          previousVotes: lastRoundVotes,
-        });
+      } catch (err: any) {
+        setAiError(err?.message || 'เชื่อมต่อ LLM API ไม่สำเร็จ กดให้บอทคุยต่ออีกครั้งได้เลย');
       }
 
       setIsGeneratingAI(false);
+      if (aiLines.length === 0) return;
 
       const generatedMsgs: ChatMessage[] = [];
       aiLines.forEach((line, idx) => {
@@ -1894,6 +2040,8 @@ export default function App() {
           id: `msg-day-${currentDay}-${idx}-${Date.now()}`,
           senderId: speaker?.id || line.speakerId,
           senderName: speaker?.name || line.speakerName,
+          senderGender: speaker?.gender,
+          senderPersona: speaker?.personaLabel,
           text: line.text,
           tone: line.tone,
           phaseLabel: `วันที่ ${currentDay} · ถกเถียง`,
@@ -1905,7 +2053,7 @@ export default function App() {
           setActiveSpeakerId(speaker?.id || line.speakerId);
           soundFX.playMessagePop(false);
           setMessages((prev) => [...prev, msgObj]);
-        }, idx * 180);
+        }, idx * 260);
       });
 
       setTimeout(() => {
@@ -1918,20 +2066,23 @@ export default function App() {
           lastProtectedId: currentLastProtected,
           seerKnowledge: updatedSeer,
           bodyguardKnowledge: updatedBg,
+          wolfKillHistory: updatedWolfHistory ?? wolfKillHistory,
+          voteHistory: currentVoteHistory ?? voteHistory,
           messages: [...baseMessages, ...generatedMsgs],
           votes: lastRoundVotes,
           winSummary: { winner: null, reasonThai: '' },
           shellState: 'PLAYING',
         });
-      }, aiLines.length * 180 + 180);
+      }, aiLines.length * 260 + 220);
     },
-    [broadcastGameState, roomId]
+    [broadcastGameState, roomId, wolfKillHistory, voteHistory]
   );
 
-  // Let AI players continue analyzing and debating among themselves
+  // Let AI players continue autonomous back-and-forth debating via live LLM
   const handleContinueAIDebate = async () => {
     if (isGeneratingAI || aliveAICount === 0) return;
     setIsGeneratingAI(true);
+    setAiError(null);
 
     let aiLines: {
       speakerId: string;
@@ -1942,8 +2093,8 @@ export default function App() {
 
     try {
       const recentTranscript = messages
-        .filter((m) => !m.isSecret)
-        .slice(-12)
+        .filter((m) => !m.isSecret && m.senderId !== 'secret')
+        .slice(-15)
         .map((m) => `${m.senderName}: ${m.text}`);
 
       const res = await fetch('/api/werewolf/discuss', {
@@ -1955,6 +2106,9 @@ export default function App() {
           players,
           seerKnowledge,
           bodyguardKnowledge,
+          wolfKillHistory,
+          voteHistory,
+          doubleKillNextNight,
           recentTranscript,
           previousVotes: votes,
           mode: 'CONTINUE_DEBATE',
@@ -1962,29 +2116,21 @@ export default function App() {
       });
       const json = await res.json();
       if (
-        !json.fallback &&
+        res.ok &&
+        json.ok &&
         Array.isArray(json.data?.messages) &&
         json.data.messages.length > 0
       ) {
         aiLines = json.data.messages;
+      } else {
+        setAiError(json.error || 'LLM API ขัดข้องชั่วคราว กรุณาลองกดอีกครั้ง');
       }
-    } catch {
-      // Fallback
-    }
-
-    if (aiLines.length === 0) {
-      aiLines = generateLocalDayDiscussion({
-        dayNumber: dayCount,
-        players,
-        victimPlayers: [],
-        seerKnowledge,
-        bodyguardKnowledge,
-        cubRageTriggeredLastRound: false,
-        previousVotes: votes,
-      }).slice(0, 3);
+    } catch (err: any) {
+      setAiError(err?.message || 'เชื่อมต่อ LLM API ไม่สำเร็จ กรุณาลองกดอีกครั้ง');
     }
 
     setIsGeneratingAI(false);
+    if (aiLines.length === 0) return;
 
     const newMsgs: ChatMessage[] = [];
     aiLines.forEach((line, idx) => {
@@ -1997,6 +2143,8 @@ export default function App() {
         id: `msg-cont-${dayCount}-${idx}-${Date.now()}`,
         senderId: speaker?.id || line.speakerId,
         senderName: speaker?.name || line.speakerName,
+        senderGender: speaker?.gender,
+        senderPersona: speaker?.personaLabel,
         text: line.text,
         tone: line.tone,
         phaseLabel: `วันที่ ${dayCount} · วิเคราะห์ต่อ`,
@@ -2008,7 +2156,7 @@ export default function App() {
         setActiveSpeakerId(speaker?.id || line.speakerId);
         soundFX.playMessagePop(false);
         setMessages((prev) => [...prev, msgObj]);
-      }, idx * 180);
+      }, idx * 260);
     });
 
     setTimeout(() => {
@@ -2021,12 +2169,14 @@ export default function App() {
         lastProtectedId,
         seerKnowledge,
         bodyguardKnowledge,
+        wolfKillHistory,
+        voteHistory,
         messages: [...messages, ...newMsgs],
         votes,
         winSummary,
         shellState: 'PLAYING',
       });
-    }, aiLines.length * 180 + 180);
+    }, aiLines.length * 260 + 220);
   };
 
   // Core Night Resolution (called immediately in solo mode, or when all online friends submit)
@@ -2038,10 +2188,51 @@ export default function App() {
       >
     ) => {
       const wasDoubleKill = doubleKillNextNight;
+
+      // Let living AI night roles (AI Wolves, AI Seer, AI Bodyguard) plan targets via live LLM
+      let aiNightPlan: AINightPlanOverrides | null = null;
+      const aliveNow = players.filter((p) => p.alive);
+      const aliveWolvesNow = aliveNow.filter((p) => isWerewolfTeam(p.role));
+      const needsAINightPlan =
+        (aliveWolvesNow.length > 0 && aliveWolvesNow.every((w) => !w.isHuman)) ||
+        aliveNow.some((p) => (p.role === 'SEER' || p.role === 'BODYGUARD') && !p.isHuman);
+
+      if (needsAINightPlan) {
+        try {
+          const recentTranscript = messages
+            .filter((m) => !m.isSecret && m.senderId !== 'secret')
+            .slice(-12)
+            .map((m) => `${m.senderName}: ${m.text}`);
+          const planRes = await fetch('/api/werewolf/night-plan', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              roomId,
+              nightNumber: dayCount,
+              doubleKillActive: wasDoubleKill,
+              lastProtectedId,
+              players,
+              seerKnowledge,
+              bodyguardKnowledge,
+              wolfKillHistory,
+              voteHistory,
+              recentTranscript,
+            }),
+          });
+          const planJson = await planRes.json();
+          if (planRes.ok && planJson.ok && planJson.data) {
+            aiNightPlan = planJson.data;
+          }
+        } catch {
+          // Rule-compliant mechanical selection handles fallback if offline
+        }
+      }
+
       const outcome = resolveNightPhase({
         nightNumber: dayCount,
         players,
         humanActions: collectedHumanActions,
+        aiNightPlan,
         doubleKillActive: wasDoubleKill,
         seerKnowledge,
         bodyguardKnowledge,
@@ -2054,9 +2245,13 @@ export default function App() {
       const nextBg = outcome.newBodyguardRecord
         ? [...bodyguardKnowledge, outcome.newBodyguardRecord]
         : bodyguardKnowledge;
+      const nextWolfHistory = outcome.newWolfKillRecord
+        ? [...wolfKillHistory, outcome.newWolfKillRecord]
+        : wolfKillHistory;
 
       setSeerKnowledge(nextSeer);
       setBodyguardKnowledge(nextBg);
+      setWolfKillHistory(nextWolfHistory);
       const nextLastProtected = outcome.protectedId || lastProtectedId;
       if (outcome.protectedId) {
         setLastProtectedId(outcome.protectedId);
@@ -2064,7 +2259,9 @@ export default function App() {
 
       const victimIds = new Set(outcome.victimPlayers.map((v) => v.id));
       const updatedPlayers = players.map((p) =>
-        victimIds.has(p.id) ? { ...p, alive: false } : p
+        victimIds.has(p.id)
+          ? { ...p, alive: false, deathCause: 'WOLF_KILL' as const, deathDay: dayCount }
+          : p
       );
 
       // Trigger dramatic Werewolf Night Kill overlay if the local human player was killed tonight
@@ -2076,13 +2273,11 @@ export default function App() {
 
       // Compute per-player Bodyguard Shield Perspective Animations (strictly privacy-filtered per player on server)
       const shieldByPlayer: Record<string, BodyguardAnimationType> = {};
-      // 1) Saved Victim's Perspective (non-Bodyguard player attacked by wolves and saved by BG)
       for (const sv of outcome.savedPlayers) {
         if (sv.role !== 'BODYGUARD') {
           shieldByPlayer[sv.id] = 'VICTIM_SAVED';
         }
       }
-      // 2) Werewolf's Perspective — Kill Blocked (living Werewolves when BG blocked a kill tonight)
       if (outcome.savedPlayers.length > 0) {
         for (const p of players) {
           if (p.alive && isWerewolfTeam(p.role) && !victimIds.has(p.id)) {
@@ -2090,7 +2285,6 @@ export default function App() {
           }
         }
       }
-      // 3) Bodyguard's Perspective — Successful Protection (including self-save) or Wrong Target
       const livingBgBeforeNight = players.find(
         (p) => p.alive && p.role === 'BODYGUARD'
       );
@@ -2173,19 +2367,21 @@ export default function App() {
         setImpactTrigger((c) => c + 1);
         const victimNames = outcome.victimPlayers.map((v) => `"${v.name}"`).join(' และ ');
         dawnAnnouncement =
-          `รุ่งอรุณของวันที่ ${dayCount} มาถึงแล้ว... เมื่อคืนมีเสียงกรีดร้องดังขึ้นในหมู่บ้าน ผู้ที่ถูกสังหารเมื่อคืนนี้คือ ${victimNames}! ` +
-          `(ตามกฎของเกม เราจะไม่เปิดเผยบทบาทของผู้เสียชีวิตในตอนกลางคืน)` +
+          `☀️ เช้าวันที่ ${dayCount} แล้ว! ทุกคนตื่นมาดูศพกันได้\n` +
+          `เมื่อคืนมีเสียงกรีดร้องดังลั่นหมู่บ้าน — ผู้ที่ถูกหมาป่าสังหารเมื่อคืนนี้คือ ${victimNames}! ` +
+          `(ตามกติกาจะไม่เปิดเผยบทบาทลับของคนตายตอนกลางคืน)` +
           (outcome.cubDiedTonight
-            ? `\n⚠️ มีเสียงหอนด้วยความพิโรธดังก้องจากป่า! "ลูกหมาป่า (Wolf Cub)" เสียชีวิตลงแล้ว ส่งผลให้คืนถัดไปหมาป่าที่เหลืออยู่จะสามารถสังหารเหยื่อได้ถึง 2 คน!`
+            ? `\n🔥 มีเสียงหอนด้วยความพิโรธดังก้องจากป่า! "ลูกหมาป่า (Wolf Cub)" เสียชีวิตลงแล้ว ส่งผลให้คืนถัดไปหมาป่าที่เหลืออยู่จะสามารถสังหารเหยื่อได้ถึง 2 ศพ!`
             : '');
       } else {
-        dawnAnnouncement = `รุ่งอรุณของวันที่ ${dayCount} มาถึงแล้ว... เมื่อคืนนี้เป็นคืนที่เงียบสงบ "ไม่มีใครเสียชีวิต!" (ดูเหมือนบอดี้การ์ดจะคุ้มกันได้ถูกจุดพอดี)`;
+        dawnAnnouncement = `☀️ เช้าวันที่ ${dayCount} แล้ว! ทุกคนตื่นได้แล้ว — เมื่อคืนนี้เงียบกริบ "ไม่มีใครเสียชีวิตสักคน!" (ดูเหมือนบอดี้การ์ดจะเซฟได้ถูกเป้าเป๊ะ)`;
       }
 
       const dawnMsg: ChatMessage = {
         id: `dawn-${dayCount}-${Date.now()}`,
         senderId: 'moderator',
-        senderName: 'ผู้ดำเนินเกม (Moderator)',
+        senderName: 'ผู้คุมเกม (GM)',
+        gmType: 'PHASE',
         text: dawnAnnouncement,
         phaseLabel: `เช้าวันที่ ${dayCount}`,
         timestamp: formatTime(),
@@ -2199,8 +2395,9 @@ export default function App() {
         const winMsg: ChatMessage = {
           id: `win-${Date.now()}`,
           senderId: 'moderator',
-          senderName: 'ผู้ดำเนินเกม (Moderator)',
-          text: `จบเกม! ${winCheck.reasonThai}`,
+          senderName: 'ผู้คุมเกม (GM)',
+          gmType: 'PHASE',
+          text: `🏆 จบเกม! ${winCheck.reasonThai}`,
           phaseLabel: 'สรุปผลแพ้ชนะ',
           timestamp: formatTime(),
         };
@@ -2219,6 +2416,8 @@ export default function App() {
           lastProtectedId: nextLastProtected,
           seerKnowledge: nextSeer,
           bodyguardKnowledge: nextBg,
+          wolfKillHistory: nextWolfHistory,
+          voteHistory,
           messages: finalMsgs,
           votes: [],
           winSummary: { winner: winCheck.winner, reasonThai: winCheck.reasonThai },
@@ -2241,6 +2440,8 @@ export default function App() {
             finalLastProtected: nextLastProtected,
             finalSeer: nextSeer,
             finalBg: nextBg,
+            finalWolfHistory: nextWolfHistory,
+            finalVoteHistory: voteHistory,
           });
         }
         return;
@@ -2249,8 +2450,6 @@ export default function App() {
       setPhase('DAY_DISCUSSION');
       soundFX.playDayTransition();
 
-      // INSTANT DAWN BROADCAST: Move ALL connected friends to Day Discussion immediately (<100ms)
-      // instead of blocking them on the Night screen while AI generates dialogue!
       broadcastGameState({
         players: updatedPlayers,
         phase: 'DAY_DISCUSSION',
@@ -2259,6 +2458,8 @@ export default function App() {
         lastProtectedId: nextLastProtected,
         seerKnowledge: nextSeer,
         bodyguardKnowledge: nextBg,
+        wolfKillHistory: nextWolfHistory,
+        voteHistory,
         messages: nextMessages,
         votes,
         winSummary: { winner: null, reasonThai: '' },
@@ -2278,7 +2479,9 @@ export default function App() {
         nextMessages,
         outcome.cubDiedTonight,
         nextLastProtected,
-        votes
+        votes,
+        nextWolfHistory,
+        voteHistory
       );
     },
     [
@@ -2286,8 +2489,11 @@ export default function App() {
       dayCount,
       players,
       myClientId,
+      roomId,
       seerKnowledge,
       bodyguardKnowledge,
+      wolfKillHistory,
+      voteHistory,
       lastProtectedId,
       messages,
       votes,
@@ -2376,6 +2582,7 @@ export default function App() {
     if (aliveAICount === 0) return;
 
     setIsGeneratingAI(true);
+    setAiError(null);
     let replies: {
       speakerId: string;
       speakerName: string;
@@ -2385,8 +2592,8 @@ export default function App() {
 
     try {
       const recentTranscript = nextMessages
-        .filter((m) => !m.isSecret)
-        .slice(-12)
+        .filter((m) => !m.isSecret && m.senderId !== 'secret')
+        .slice(-15)
         .map((m) => `${m.senderName}: ${m.text}`);
 
       const res = await fetch('/api/werewolf/discuss', {
@@ -2398,6 +2605,9 @@ export default function App() {
           players,
           seerKnowledge,
           bodyguardKnowledge,
+          wolfKillHistory,
+          voteHistory,
+          doubleKillNextNight,
           recentTranscript,
           previousVotes: votes,
           humanMessage: textToSend,
@@ -2407,26 +2617,21 @@ export default function App() {
       });
       const json = await res.json();
       if (
-        !json.fallback &&
+        res.ok &&
+        json.ok &&
         Array.isArray(json.data?.messages) &&
         json.data.messages.length > 0
       ) {
         replies = json.data.messages;
+      } else {
+        setAiError(json.error || 'LLM API ตอบกลับไม่สำเร็จ กดลองให้บอทคุยต่ออีกครั้ง');
       }
-    } catch {
-      // Fallback
-    }
-
-    if (replies.length === 0) {
-      replies = generateLocalReplyToHuman({
-        players,
-        speakerName: myPlayer.shortName,
-        humanMessage: textToSend,
-        seerKnowledge,
-      });
+    } catch (err: any) {
+      setAiError(err?.message || 'เชื่อมต่อ LLM API ไม่สำเร็จ กดลองให้บอทคุยต่ออีกครั้ง');
     }
 
     setIsGeneratingAI(false);
+    if (replies.length === 0) return;
 
     const replyMsgs: ChatMessage[] = [];
     replies.forEach((rep, idx) => {
@@ -2439,6 +2644,8 @@ export default function App() {
         id: `reply-${Date.now()}-${idx}`,
         senderId: speaker?.id || rep.speakerId,
         senderName: speaker?.name || rep.speakerName,
+        senderGender: speaker?.gender,
+        senderPersona: speaker?.personaLabel,
         text: rep.text,
         tone: rep.tone,
         phaseLabel: `วันที่ ${dayCount} · โต้ตอบ`,
@@ -2450,7 +2657,7 @@ export default function App() {
         setActiveSpeakerId(speaker?.id || rep.speakerId);
         soundFX.playMessagePop(false);
         setMessages((prev) => [...prev, msgObj]);
-      }, idx * 180);
+      }, idx * 260);
     });
 
     setTimeout(() => {
@@ -2463,12 +2670,14 @@ export default function App() {
         lastProtectedId,
         seerKnowledge,
         bodyguardKnowledge,
+        wolfKillHistory,
+        voteHistory,
         messages: [...nextMessages, ...replyMsgs],
         votes,
         winSummary,
         shellState: 'PLAYING',
       });
-    }, replies.length * 180 + 180);
+    }, replies.length * 260 + 220);
   };
 
   // Enter Day Voting Phase (triggered ONLY when ALL living players — humans + AI — confirm ready!)
@@ -2483,8 +2692,9 @@ export default function App() {
     const votePromptMsg: ChatMessage = {
       id: `vote-prompt-${dayCount}-${Date.now()}`,
       senderId: 'moderator',
-      senderName: 'ผู้ดำเนินเกม (Moderator)',
-      text: `ผู้รอดชีวิตทุกคน (ทั้งคนจริงและ AI) กดพร้อมครบแล้ว! เข้าสู่ "ช่วงโหวตประหาร" วันที่ ${dayCount} โปรดเลือกผู้เล่น 1 คนที่คุณต้องการโหวตออกจากหมู่บ้าน (หากผลโหวตสูงสุดเสมอกัน จะไม่มีใครถูกประหาร)`,
+      senderName: 'ผู้คุมเกม (GM)',
+      gmType: 'PHASE',
+      text: `⚖️ ผู้รอดชีวิตกดพร้อมครบแล้ว! เข้าสู่ "ช่วงโหวตประหาร" วันที่ ${dayCount} — รีบชี้ตัวคนที่สงสัยซะพวกเอ็ง (หากคะแนนโหวตสูงสุดเสมอกัน จะไม่มีใครถูกประหาร)`,
       phaseLabel: `วันที่ ${dayCount} · โหวตประหาร`,
       timestamp: formatTime(),
     };
@@ -2534,18 +2744,19 @@ export default function App() {
 
       const triggerReasonPrefix =
         reason === 'TIMEOUT'
-          ? `ครบเวลาพูดคุย 5 นาทีแล้ว! ระบบตัดเข้าสู่ คืนที่ ${nextNight}:`
-          : `ผู้รอดชีวิตทุกคนกดยืนยันพร้อมครบแล้ว! ข้ามเข้าสู่ คืนที่ ${nextNight} ทันที:`;
+          ? `⏰ ครบเวลาคุย 5 นาทีแล้ว! ตัดเข้าสู่คืนที่ ${nextNight}`
+          : `🌙 ทุกคนกดพร้อมครบแล้ว! เข้าสู่ยามวิกาล คืนที่ ${nextNight}`;
 
       const nightStartMsg: ChatMessage = {
         id: `night-start-${nextNight}-${Date.now()}`,
         senderId: 'moderator',
-        senderName: 'ผู้ดำเนินเกม (Moderator)',
+        senderName: 'ผู้คุมเกม (GM)',
+        gmType: 'PHASE',
         text:
-          `${triggerReasonPrefix} ความมืดกลับมาปกคลุมหมู่บ้านจันทร์ทมิฬอีกครั้ง...\n` +
-          `ขอให้ทุกคนหลับตาลง และเลือกแอ็กชันประจำบทบาทของคุณในยามวิกาล` +
+          `${triggerReasonPrefix} — หลับตาซะพวกชาวบ้าน!\n` +
+          `ใครมีบทบาทลับตื่นขึ้นมาเลือกเป้าหมายของตัวเองได้เลย` +
           (doubleKillNextNight
-            ? `\n🔥 [คำสาปลูกหมาป่าทำงาน] คืนนี้หมาป่าที่เหลืออยู่สามารถสังหารเหยื่อได้ถึง 2 คน!`
+            ? `\n🔥 [คำสาปลูกหมาป่าทำงาน] คืนนี้หมาป่าที่เหลืออยู่สามารถสังหารเหยื่อได้ถึง 2 ศพ!`
             : ''),
         phaseLabel: `คืนที่ ${nextNight} · ยามวิกาล`,
         timestamp: formatTime(),
@@ -2729,6 +2940,7 @@ export default function App() {
         // All voters are real humans (e.g., 10 real human players)
         resolvedVotes = humanVoteRecords;
       } else {
+        setAiError(null);
         try {
           const res = await fetch('/api/werewolf/vote', {
             method: 'POST',
@@ -2739,12 +2951,15 @@ export default function App() {
               players,
               seerKnowledge,
               bodyguardKnowledge,
+              wolfKillHistory,
+              voteHistory,
               recentTranscript,
             }),
           });
           const json = await res.json();
           if (
-            !json.fallback &&
+            res.ok &&
+            json.ok &&
             Array.isArray(json.data?.votes) &&
             json.data.votes.length > 0
           ) {
@@ -2762,14 +2977,14 @@ export default function App() {
                   voterName: voter.name,
                   targetId: ABSTAIN_VOTE_ID,
                   targetName: 'งดออกเสียง (ไม่โหวต)',
-                  reason: v.reason || 'ข้อมูลยังไม่ชัด ขอเก็บไว้ตัดสินใจวันอื่น',
+                  reason: v.reason || 'ยังไม่ชัวร์ ขอข้ามก่อน',
                 });
                 continue;
               }
               const target = players.find(
                 (p) => p.id === v.targetId || p.name.includes(v.targetId)
               );
-              if (target && target.alive) {
+              if (target && target.alive && target.id !== voter.id) {
                 aiVoteRecords.push({
                   voterId: voter.id,
                   voterName: voter.name,
@@ -2779,25 +2994,31 @@ export default function App() {
                 });
               }
             }
-            if (aiVoteRecords.length >= Math.max(1, eligibleAI.length - 1)) {
+            if (aiVoteRecords.length > 0) {
               resolvedVotes = [...humanVoteRecords, ...aiVoteRecords];
             }
+          } else {
+            throw new Error(json.error || 'LLM API ไม่สามารถคำนวณโหวต AI ได้');
           }
-        } catch {
-          // Fallback
+        } catch (err: any) {
+          pendingVoteRetryRef.current = collectedHumanVotes;
+          setIsGeneratingAI(false);
+          setAiError(
+            err?.message ||
+              'LLM API ขัดข้องระหว่างนับคะแนนโหวต AI กรุณากดลองประมวลผลโหวตอีกครั้ง'
+          );
+          return;
         }
 
         if (resolvedVotes.length === 0) {
-          resolvedVotes = generateLocalVotes({
-            players,
-            humanVotesMap: collectedHumanVotes,
-            seerKnowledge,
-            bodyguardKnowledge,
-            recentTranscript,
-          });
+          pendingVoteRetryRef.current = collectedHumanVotes;
+          setIsGeneratingAI(false);
+          setAiError('LLM API ส่งข้อมูลโหวตไม่ครบ กรุณากดลองประมวลผลโหวตอีกครั้ง');
+          return;
         }
       }
 
+      pendingVoteRetryRef.current = null;
       setIsGeneratingAI(false);
       setVotes(resolvedVotes);
       setVoteReadyIds([]);
@@ -2828,11 +3049,9 @@ export default function App() {
       let specialResultText = '';
       let nextDoubleKill = doubleKillNextNight;
 
-      // ABSTAIN / TIE RULE:
-      // - If nobody voted against a player (maxVotes === 0), OR
-      // - If abstain count >= highest suspect's votes, OR
-      // - If top suspects are tied -> NOBODY is executed!
       let executedVictimId: string | null = null;
+      let executedNameForHistory: string | null = null;
+      let beggarRevealedForHistory: string | null = null;
       let voteAnnouncementPayload: AnnouncementBannerData | null = null;
       if (maxVotes === 0) {
         soundFX.playMessagePop(true);
@@ -2857,7 +3076,7 @@ export default function App() {
         setImpactTrigger((c) => c + 1);
 
         if (executedPlayer.role === 'BEGGAR' && !executedPlayer.revealedBeggar) {
-          // Beggar/Idiot survives execution — do NOT trigger death animation!
+          beggarRevealedForHistory = executedPlayer.name;
           updatedPlayers = players.map((p) =>
             p.id === executedPlayer.id
               ? { ...p, alive: true, canVote: false, revealedBeggar: true }
@@ -2874,8 +3093,11 @@ export default function App() {
             `เขารอดชีวิตจากการถูกประหารในวันนี้! แต่จะสูญเสียสิทธิ์ในการลงคะแนนโหวตไปตลอดทั้งเกมที่เหลือ`;
         } else {
           executedVictimId = executedPlayer.id;
+          executedNameForHistory = executedPlayer.name;
           updatedPlayers = players.map((p) =>
-            p.id === executedPlayer.id ? { ...p, alive: false } : p
+            p.id === executedPlayer.id
+              ? { ...p, alive: false, deathCause: 'DAY_EXECUTION' as const, deathDay: dayCount }
+              : p
           );
           voteAnnouncementPayload = {
             eventId: `ann-v${dayCount}-${Date.now()}`,
@@ -2896,6 +3118,17 @@ export default function App() {
           }
         }
       }
+
+      const nextVoteHistory: RoundVoteHistory[] = [
+        ...voteHistory,
+        {
+          day: dayCount,
+          votes: resolvedVotes,
+          executedName: executedNameForHistory,
+          beggarRevealedName: beggarRevealedForHistory,
+        },
+      ];
+      setVoteHistory(nextVoteHistory);
 
       // Trigger dramatic Villager Execution animation ONLY if the local human player was actually executed (not Beggar survival)
       const myBeforeVote = players.find((p) => p.id === myClientId);
@@ -2939,7 +3172,8 @@ export default function App() {
       const voteResultMsg: ChatMessage = {
         id: `vote-result-${dayCount}-${Date.now()}`,
         senderId: 'moderator',
-        senderName: 'ผู้ดำเนินเกม (Moderator)',
+        senderName: 'ผู้คุมเกม (GM)',
+        gmType: 'EVENT',
         text: voteBreakdownText,
         phaseLabel: `วันที่ ${dayCount} · ผลโหวต`,
         timestamp: formatTime(),
@@ -2953,8 +3187,9 @@ export default function App() {
         const winMsg: ChatMessage = {
           id: `win-exec-${Date.now()}`,
           senderId: 'moderator',
-          senderName: 'ผู้ดำเนินเกม (Moderator)',
-          text: `จบเกม! ${winCheck.reasonThai}`,
+          senderName: 'ผู้คุมเกม (GM)',
+          gmType: 'PHASE',
+          text: `🏆 จบเกม! ${winCheck.reasonThai}`,
           phaseLabel: 'สรุปผลแพ้ชนะ',
           timestamp: formatTime(),
         };
@@ -2973,6 +3208,8 @@ export default function App() {
           lastProtectedId,
           seerKnowledge,
           bodyguardKnowledge,
+          wolfKillHistory,
+          voteHistory: nextVoteHistory,
           messages: finalMsgs,
           votes: resolvedVotes,
           winSummary: { winner: winCheck.winner, reasonThai: winCheck.reasonThai },
@@ -2994,6 +3231,8 @@ export default function App() {
             finalLastProtected: lastProtectedId,
             finalSeer: seerKnowledge,
             finalBg: bodyguardKnowledge,
+            finalWolfHistory: wolfKillHistory,
+            finalVoteHistory: nextVoteHistory,
           });
         }
         return;
@@ -3010,11 +3249,12 @@ export default function App() {
       const readyForNightMsg: ChatMessage = {
         id: `day-result-ready-${dayCount}-${Date.now()}`,
         senderId: 'moderator',
-        senderName: 'ผู้ดำเนินเกม (Moderator)',
+        senderName: 'ผู้คุมเกม (GM)',
+        gmType: 'PHASE',
         text:
-          `สรุปผลโหวตวันที่ ${dayCount} เสร็จสิ้นแล้ว · สามารถพูดคุยกันต่อได้สูงสุด 5 นาทีก่อนระบบตัดเข้าสู่คืนที่ ${nextNight} อัตโนมัติ ` +
-          `หรือหากผู้รอดชีวิตทุกคน (ทั้งคนจริงและ AI) กด "พร้อมเข้าสู่คืนที่ ${nextNight}" ครบทุกคนจะข้ามเข้ากลางคืนทันที!`,
-        phaseLabel: `วันที่ ${dayCount} · คุยต่อ / รอเข้าคืนที่ ${nextNight}`,
+          `🎙️ สรุปผลโหวตวันที่ ${dayCount} เสร็จสิ้นแล้ว! คุยกันต่อได้สูงสุด 5 นาทีก่อนตัดเข้าสู่คืนที่ ${nextNight} อัตโนมัติ ` +
+          `หรือกด "พร้อมเข้าสู่คืนที่ ${nextNight}" ครบทุกคนเพื่อข้ามเข้ากลางคืนทันที`,
+        phaseLabel: `วันที่ ${dayCount} · รอเข้าคืนที่ ${nextNight}`,
         timestamp: formatTime(),
       };
 
@@ -3029,6 +3269,8 @@ export default function App() {
         lastProtectedId,
         seerKnowledge,
         bodyguardKnowledge,
+        wolfKillHistory,
+        voteHistory: nextVoteHistory,
         messages: afterResultMsgs,
         votes: resolvedVotes,
         winSummary,
@@ -3041,8 +3283,11 @@ export default function App() {
       messages,
       players,
       dayCount,
+      myClientId,
       seerKnowledge,
       bodyguardKnowledge,
+      wolfKillHistory,
+      voteHistory,
       doubleKillNextNight,
       lastProtectedId,
       winSummary,
@@ -3811,29 +4056,6 @@ export default function App() {
 
               {/* Right: Compact Action Controls */}
               <div className="flex items-center gap-1 md:gap-2 shrink-0">
-                {/* Mobile ONLY: Collapsible Player List Drawer Toggle */}
-                <button
-                  type="button"
-                  onClick={() => setShowMobilePlayers((v) => !v)}
-                  className={`md:hidden min-h-[38px] px-2.5 py-1.5 rounded-lg text-[11px] font-bold flex items-center gap-1 border transition-colors cursor-pointer whitespace-nowrap shrink-0 ${
-                    showMobilePlayers
-                      ? 'bg-amber-500/20 text-amber-300 border-amber-400/60'
-                      : 'bg-slate-800/90 text-slate-200 border-slate-700 hover:bg-slate-700'
-                  }`}
-                  title="ซ่อน/แสดงรายชื่อผู้เล่น"
-                  aria-expanded={showMobilePlayers}
-                >
-                  <Users className="w-3.5 h-3.5 text-amber-400" />
-                  <span className="tabular-nums">
-                    ผู้เล่น ({alivePlayers.length}/{players.length})
-                  </span>
-                  {showMobilePlayers ? (
-                    <ChevronUp className="w-3.5 h-3.5 text-amber-300" />
-                  ) : (
-                    <ChevronDown className="w-3.5 h-3.5 text-slate-400" />
-                  )}
-                </button>
-
                 {/* Peek Own Secret Role Card Button (Compact on Mobile, Detailed on Desktop) */}
                 {myPlayer ? (
                   <button
@@ -3927,83 +4149,426 @@ export default function App() {
               </div>
             </div>
 
-            {/* Mobile ONLY: Collapsible Compact Player List Drawer (Slim horizontal chips — collapses completely when closed) */}
-            {showMobilePlayers && (
-              <div className="md:hidden shrink-0 mt-1.5 pointer-events-auto bg-[#0B1324]/95 border border-slate-800 rounded-xl px-2.5 py-2 shadow-xl space-y-1.5">
-                <div className="flex items-center justify-between text-[11px] text-slate-400">
-                  <span className="font-semibold text-slate-200">
-                    รายชื่อผู้เล่น ({alivePlayers.length}/{players.length} รอดชีวิต)
-                    {doubleKillNextNight ? ' · 🔥 ฆ่า 2 ศพ!' : ''}
-                  </span>
-                  <button
-                    type="button"
-                    onClick={() => setShowMobilePlayers(false)}
-                    className="text-amber-300 font-semibold px-1.5 py-0.5 rounded hover:bg-slate-800 cursor-pointer"
-                  >
-                    ซ่อน
-                  </button>
-                </div>
-                <div className="flex flex-wrap gap-1">
-                  {players.map((p, index) => {
-                    const isSelected =
-                      selectedTargetId === p.id || secondTargetId === p.id;
-                    const isFellow = fellowWolves.some((w) => w.id === p.id);
-                    const seerStat = seerKnownMap[p.id];
-                    const isCurrentViewer = Boolean(myPlayer && p.id === myPlayer.id);
-                    const isReadyInPhase =
-                      p.alive &&
-                      (phase === 'DAY_DISCUSSION' || phase === 'DAY_RESULT') &&
-                      phaseReadyIds.includes(p.id);
-
-                    return (
-                      <button
-                        key={p.id}
-                        type="button"
-                        onClick={() => handleSelectPlayerOnCanvas(p.id)}
-                        disabled={!p.alive}
-                        className={`inline-flex items-center gap-1 px-2 py-1 rounded-lg text-[11px] font-semibold border transition-colors cursor-pointer ${
-                          !p.alive
-                            ? 'bg-slate-950/60 border-slate-800/80 text-slate-500 line-through opacity-55 cursor-not-allowed'
-                            : isSelected
-                            ? 'bg-amber-500/25 border-amber-400 text-amber-200'
-                            : isFellow
-                            ? 'bg-red-950/50 border-red-500/50 text-red-200'
-                            : isCurrentViewer
-                            ? 'bg-sky-950/50 border-sky-500/50 text-sky-200'
-                            : 'bg-slate-900/90 border-slate-700/80 text-slate-200 hover:border-slate-500'
-                        }`}
-                      >
-                        {!p.alive ? (
-                          <Skull className="w-3 h-3 text-red-400 shrink-0" />
-                        ) : (
-                          <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 shrink-0" />
-                        )}
-                        <span className="truncate max-w-[96px]">
-                          {index + 1}. {p.shortName}
-                        </span>
-                        {isSelected && <Check className="w-3 h-3 text-amber-300 shrink-0" />}
-                        {isReadyInPhase && (
-                          <span className="text-[10px] text-emerald-400">✓</span>
-                        )}
-                        {isFellow && <span className="text-[10px]">🐺</span>}
-                        {seerStat !== undefined && (
-                          <span
-                            className={`text-[10px] font-bold ${
-                              seerStat ? 'text-red-400' : 'text-emerald-400'
-                            }`}
-                          >
-                            {seerStat ? '🐺' : '✓'}
-                          </span>
-                        )}
-                      </button>
-                    );
-                  })}
-                </div>
-              </div>
-            )}
-
             {/* Main Split Playfield */}
             <div className="flex-1 min-h-0 flex flex-col md:flex-row items-stretch justify-between gap-1.5 md:gap-4 mt-1.5 md:mt-3">
+              {/* Mobile Tab 1 ONLY: Players & Voting Panel */}
+              {mobileActiveTab === 'PLAYERS' && (
+                <div className="md:hidden flex-1 min-h-0 flex flex-col pointer-events-auto bg-[#0A1120]/96 border border-slate-800/90 rounded-xl shadow-2xl overflow-hidden">
+                  <div className="shrink-0 px-3 py-2.5 border-b border-slate-800 bg-[#0F172A] flex items-center justify-between gap-2">
+                    <div className="flex items-center gap-2 min-w-0">
+                      <Users className="w-4 h-4 text-amber-400 shrink-0" />
+                      <span className="text-xs font-bold text-white truncate">
+                        ผู้เล่นในหมู่บ้าน ({alivePlayers.length}/{players.length} รอดชีวิต)
+                      </span>
+                    </div>
+                    <span className="text-[11px] text-amber-300 font-mono tabular-nums truncate shrink-0">
+                      {selectedTargetId === ABSTAIN_VOTE_ID
+                        ? 'งดออกเสียง'
+                        : selectedTargetId
+                        ? `เลือก: ${players.find((p) => p.id === selectedTargetId)?.shortName}`
+                        : 'แตะเลือกเป้าหมาย'}
+                    </span>
+                  </div>
+
+                  <div className="flex-1 min-h-0 overflow-y-auto p-2.5 grid grid-cols-2 gap-2 content-start">
+                    {players.map((p, index) => {
+                      const selectable = isTargetSelectable(p);
+                      const isSelected =
+                        selectedTargetId === p.id || secondTargetId === p.id;
+                      const isFellow = fellowWolves.some((w) => w.id === p.id);
+                      const seerStat = seerKnownMap[p.id];
+                      const isCurrentViewer = Boolean(myPlayer && p.id === myPlayer.id);
+                      const isReadyInPhase =
+                        p.alive &&
+                        (phase === 'DAY_DISCUSSION' || phase === 'DAY_RESULT') &&
+                        phaseReadyIds.includes(p.id);
+                      const signaledByMe =
+                        amWerewolf &&
+                        phase === 'NIGHT_ACTION' &&
+                        myWolfSignalTargetId === p.id;
+                      const signaledByPartner =
+                        amWerewolf &&
+                        phase === 'NIGHT_ACTION' &&
+                        fellowWolfSignalTargetId === p.id;
+
+                      return (
+                        <button
+                          key={p.id}
+                          type="button"
+                          onClick={() => handleSelectPlayerOnCanvas(p.id)}
+                          disabled={!p.alive}
+                          className={`min-h-[64px] text-left p-2.5 rounded-xl border transition-all cursor-pointer flex items-start gap-2 ${
+                            !p.alive
+                              ? 'bg-slate-950/65 border-slate-900 opacity-50 cursor-not-allowed'
+                              : signaledByMe && signaledByPartner
+                              ? 'bg-red-950/55 border-red-400 shadow-[0_0_12px_rgba(239,68,68,0.3)]'
+                              : isSelected
+                              ? 'bg-amber-500/20 border-amber-400 shadow-[0_0_12px_rgba(245,158,11,0.25)]'
+                              : signaledByPartner
+                              ? 'bg-red-950/30 border-red-500/60'
+                              : selectable
+                              ? 'bg-slate-900/90 border-slate-800 active:scale-[0.98]'
+                              : 'bg-slate-900/55 border-slate-800/70'
+                          }`}
+                        >
+                          <div
+                            className="w-8 h-8 rounded-full flex items-center justify-center text-white font-bold text-xs shrink-0 mt-0.5 relative"
+                            style={{ backgroundColor: p.avatarColor }}
+                          >
+                            {Array.from(p.shortName)[0] || index + 1}
+                            <span className="absolute -bottom-1 -right-1 w-4 h-4 rounded-full bg-slate-950 text-[9px] font-mono font-bold text-white border border-slate-700 flex items-center justify-center">
+                              {index + 1}
+                            </span>
+                          </div>
+                          <div className="min-w-0 flex-1">
+                            <div className="flex items-center justify-between gap-1 text-xs font-bold text-white">
+                              <span className="truncate inline-flex items-center gap-1">
+                                <span className={!p.alive ? 'line-through text-slate-400' : ''}>
+                                  {p.shortName}
+                                </span>
+                                {!p.isHuman && p.gender && (
+                                  <span
+                                    className={`text-[10px] ${
+                                      p.gender === 'M' ? 'text-sky-400' : 'text-pink-400'
+                                    }`}
+                                  >
+                                    {p.gender === 'M' ? '♂' : '♀'}
+                                  </span>
+                                )}
+                              </span>
+                              {!p.alive ? (
+                                <Skull className="w-3.5 h-3.5 text-red-400 shrink-0" />
+                              ) : isSelected ? (
+                                <Check className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+                              ) : null}
+                            </div>
+                            <div className="text-[10px] text-slate-400 truncate mt-0.5">
+                              {p.alive
+                                ? p.revealedBeggar
+                                  ? 'ยาจก (งดโหวต)'
+                                  : isCurrentViewer
+                                  ? `คุณ (${ROLE_INFO[p.role].thaiName})`
+                                  : !p.isHuman
+                                  ? p.personaLabel
+                                  : 'ผู้เล่นคนจริง'
+                                : p.deathCause === 'WOLF_KILL'
+                                ? 'โดนหมาป่าฆ่า'
+                                : p.deathCause === 'DAY_EXECUTION'
+                                ? 'โดนโหวตประหาร'
+                                : 'เสียชีวิตแล้ว'}
+                            </div>
+                            <div className="flex flex-wrap items-center gap-1 mt-1 text-[10px] font-semibold">
+                              {isReadyInPhase && (
+                                <span className="text-emerald-400">✓ พร้อม</span>
+                              )}
+                              {isFellow && (
+                                <span className="text-red-400">🐺 ฝูงเรา</span>
+                              )}
+                              {(signaledByMe || signaledByPartner) && (
+                                <span className={signaledByMe && signaledByPartner ? 'text-emerald-300' : 'text-red-300'}>
+                                  {signaledByMe && signaledByPartner
+                                    ? '🎯 ตรงกัน'
+                                    : signaledByMe
+                                    ? '🎯 คุณเล็ง'
+                                    : '🎯 เพื่อนเล็ง'}
+                                </span>
+                              )}
+                              {seerStat !== undefined && (
+                                <span className={seerStat ? 'text-red-400' : 'text-emerald-400'}>
+                                  {seerStat ? '🔮 หมาป่า!' : '🔮 ชาวบ้าน'}
+                                </span>
+                              )}
+                            </div>
+                          </div>
+                        </button>
+                      );
+                    })}
+                  </div>
+
+                  {/* Mobile Tab 1 Contextual Bottom Action Bar (Voting / Night Target / Quick Return to Chat) */}
+                  <div className="shrink-0 p-2.5 border-t border-slate-800 bg-[#0D1526] space-y-1.5">
+                    {phase === 'DAY_VOTING' && myPlayer?.alive && myPlayer.canVote && !(hasSubmittedVote && isMultiDeviceOnline) ? (
+                      <>
+                        <div className="grid grid-cols-3 gap-1.5">
+                          <button
+                            type="button"
+                            onClick={() => setSelectedTargetId(ABSTAIN_VOTE_ID)}
+                            className={`min-h-[42px] px-2.5 py-1.5 rounded-xl text-xs font-bold border transition-colors cursor-pointer flex items-center justify-center gap-1 ${
+                              selectedTargetId === ABSTAIN_VOTE_ID
+                                ? 'bg-amber-400 text-slate-950 border-amber-300'
+                                : 'bg-slate-900 text-amber-200 border-amber-500/40'
+                            }`}
+                          >
+                            <Ban className="w-3.5 h-3.5" />
+                            <span>งดโหวต</span>
+                          </button>
+                          <button
+                            type="button"
+                            onClick={handleConfirmVote}
+                            disabled={!selectedTargetId || isGeneratingAI}
+                            className={`col-span-2 min-h-[42px] px-3 py-1.5 rounded-xl disabled:bg-slate-800 disabled:text-slate-500 font-bold text-xs transition-colors cursor-pointer ${
+                              selectedTargetId === ABSTAIN_VOTE_ID
+                                ? 'bg-amber-500 hover:bg-amber-400 text-slate-950'
+                                : 'bg-red-600 hover:bg-red-500 text-white'
+                            }`}
+                          >
+                            {selectedTargetId === ABSTAIN_VOTE_ID
+                              ? 'ยืนยัน: งดออกเสียง'
+                              : selectedTargetId
+                              ? `ยืนยันโหวต "${players.find((p) => p.id === selectedTargetId)?.shortName}"`
+                              : 'แตะเลือกชื่อผู้เล่นด้านบน'}
+                          </button>
+                        </div>
+                      </>
+                    ) : phase === 'NIGHT_ACTION' && myPlayer?.alive && myPlayer.role !== 'VILLAGER' && myPlayer.role !== 'BEGGAR' && !(hasSubmittedNight && isMultiDeviceOnline) ? (
+                      <button
+                        type="button"
+                        onClick={handleConfirmNightAction}
+                        disabled={!selectedTargetId || (requiresWolfConsensus && !wolvesAgreedOnTarget)}
+                        className="w-full min-h-[44px] py-2 px-4 rounded-xl bg-amber-500 hover:bg-amber-400 disabled:bg-slate-800 disabled:text-slate-500 text-slate-950 font-bold text-xs cursor-pointer flex items-center justify-center gap-1.5"
+                      >
+                        <Shield className="w-4 h-4" />
+                        <span>
+                          {!selectedTargetId
+                            ? 'แตะเลือกเป้าหมายจากรายชื่อด้านบน'
+                            : requiresWolfConsensus && !wolvesAgreedOnTarget
+                            ? 'รอเพื่อนหมาป่าส่งซิกตรงกันก่อน'
+                            : `ยืนยันแอ็กชันคืนที่ ${dayCount} กับ ${players.find((p) => p.id === selectedTargetId)?.shortName}`}
+                        </span>
+                      </button>
+                    ) : (
+                      <button
+                        type="button"
+                        onClick={() => setMobileActiveTab('CHAT')}
+                        className="w-full min-h-[42px] py-2 px-4 rounded-xl bg-[#06C755] hover:bg-[#05b34c] text-white font-bold text-xs cursor-pointer flex items-center justify-center gap-1.5"
+                      >
+                        <MessageSquare className="w-4 h-4" />
+                        <span>กลับไปหน้าแชทกลาง (LINE กลุ่ม)</span>
+                      </button>
+                    )}
+                  </div>
+                </div>
+              )}
+
+              {/* Mobile Tab 3 ONLY: Secret Role Card, Personal Intel, Night Skills & Werewolf Secret Chat */}
+              {mobileActiveTab === 'ROLE' && (
+                <div className="md:hidden flex-1 min-h-0 flex flex-col pointer-events-auto bg-[#0A1120]/96 border border-slate-800/90 rounded-xl shadow-2xl overflow-hidden">
+                  <div className="shrink-0 px-3 py-2.5 border-b border-slate-800 bg-[#0F172A] flex items-center justify-between gap-2">
+                    <div className="flex items-center gap-2 min-w-0">
+                      <Shield className="w-4 h-4 text-amber-400 shrink-0" />
+                      <span className="text-xs font-bold text-white truncate">
+                        บทบาทลับ · สกิล{amWerewolf ? ' & แชทลับหมาป่า' : ''}
+                      </span>
+                    </div>
+                    {myPlayer && (
+                      <button
+                        type="button"
+                        onClick={() => setRevealTabRoleCard((v) => !v)}
+                        className="px-2.5 py-1 rounded-lg bg-slate-800 text-amber-300 border border-amber-500/35 text-[11px] font-bold flex items-center gap-1 cursor-pointer shrink-0"
+                      >
+                        {revealTabRoleCard ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
+                        <span>{revealTabRoleCard ? 'ซ่อนการ์ด' : 'เปิดดูการ์ด'}</span>
+                      </button>
+                    )}
+                  </div>
+
+                  <div className="flex-1 min-h-0 overflow-y-auto p-3 space-y-3">
+                    {myPlayer ? (
+                      <div className="rounded-xl bg-slate-900/90 border border-slate-800 p-3 space-y-2">
+                        {revealTabRoleCard ? (
+                          <>
+                            <div className="flex items-center gap-3">
+                              {ROLE_INFO[myPlayer.role].image && !roleCardImgError && (
+                                <img
+                                  src={ROLE_INFO[myPlayer.role].image}
+                                  alt={ROLE_INFO[myPlayer.role].thaiName}
+                                  onError={() => setRoleCardImgError(true)}
+                                  className="w-16 h-20 object-cover rounded-lg border border-amber-500/40 shrink-0"
+                                />
+                              )}
+                              <div className="min-w-0 flex-1 space-y-1">
+                                <div className="text-[11px] font-semibold text-amber-300">
+                                  {ROLE_INFO[myPlayer.role].teamThai}
+                                </div>
+                                <div className="text-base font-bold text-white leading-tight">
+                                  {ROLE_INFO[myPlayer.role].thaiName}
+                                </div>
+                                <div className="text-[11px] text-slate-300 leading-relaxed">
+                                  {ROLE_INFO[myPlayer.role].summary}
+                                </div>
+                              </div>
+                            </div>
+                            {fellowWolves.length > 0 && (
+                              <div className="rounded-lg bg-red-950/45 border border-red-800/60 px-2.5 py-1.5 text-[11px] text-red-200">
+                                🐺 เพื่อนร่วมฝูงหมาป่า:{' '}
+                                <strong className="text-red-100">
+                                  {fellowWolves
+                                    .map((w) => `${w.name} (${ROLE_INFO[w.role].thaiName})${w.alive ? '' : ' [ตายแล้ว]'}`)
+                                    .join(', ')}
+                                </strong>
+                              </div>
+                            )}
+                          </>
+                        ) : (
+                          <button
+                            type="button"
+                            onClick={() => setRevealTabRoleCard(true)}
+                            className="w-full py-4 rounded-lg border border-dashed border-amber-500/40 bg-slate-950/70 text-center space-y-1 cursor-pointer"
+                          >
+                            <div className="text-xs font-bold text-amber-300 flex items-center justify-center gap-1.5">
+                              <Eye className="w-4 h-4" />
+                              <span>แตะเพื่อเปิดดูบทบาทลับของ {myPlayer.shortName}</span>
+                            </div>
+                            <p className="text-[11px] text-slate-400">
+                              ซ่อนไว้เพื่อป้องกันเพื่อนข้างๆ แอบดูหน้าจอ
+                            </p>
+                          </button>
+                        )}
+                      </div>
+                    ) : (
+                      <div className="rounded-xl bg-slate-900 border border-slate-800 p-3 text-xs text-slate-300 text-center">
+                        โหมดผู้ชม — คุณจะเข้าร่วมเป็นผู้เล่นในเกมรอบถัดไป
+                      </div>
+                    )}
+
+                    {/* Personal Intel Logs (Seer / Bodyguard) */}
+                    {myPlayer?.role === 'SEER' && seerKnowledge.length > 0 && (
+                      <div className="rounded-xl bg-amber-950/25 border border-amber-500/35 p-3 space-y-1.5">
+                        <div className="text-xs font-bold text-amber-300">🔮 บันทึกผลส่องของเทพพยากรณ์</div>
+                        <div className="space-y-1">
+                          {seerKnowledge.map((sk, idx) => (
+                            <div key={idx} className="text-xs text-slate-200 flex items-center justify-between">
+                              <span>คืนที่ {sk.night}: {sk.targetName}</span>
+                              <span className={`font-bold ${sk.isWerewolf ? 'text-red-400' : 'text-emerald-400'}`}>
+                                {sk.isWerewolf ? 'หมาป่า!' : 'ชาวบ้าน'}
+                              </span>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+
+                    {myPlayer?.role === 'BODYGUARD' && bodyguardKnowledge.length > 0 && (
+                      <div className="rounded-xl bg-emerald-950/25 border border-emerald-500/35 p-3 space-y-1.5">
+                        <div className="text-xs font-bold text-emerald-300">🛡️ บันทึกการคุ้มกันของบอดี้การ์ด</div>
+                        <div className="space-y-1">
+                          {bodyguardKnowledge.map((bk, idx) => (
+                            <div key={idx} className="text-xs text-slate-200 flex items-center justify-between">
+                              <span>คืนที่ {bk.night}: กัน {bk.targetName}</span>
+                              <span className="text-[11px] text-emerald-300 font-semibold">
+                                {bk.savedAttack ? 'เซฟชีวิตสำเร็จ!' : 'ปกติ'}
+                              </span>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Werewolf Secret Chat inside Mobile Tab 3 */}
+                    {amWerewolf && (
+                      <div className="rounded-xl border border-red-900/70 bg-[#140A10]/95 overflow-hidden flex flex-col">
+                        <div className="px-3 py-2 bg-red-950/70 border-b border-red-900/60 text-xs font-bold text-red-200 flex items-center justify-between">
+                          <span>🐺 แชทลับฝูงหมาป่า (ชาวบ้านไม่เห็น)</span>
+                          <span className="text-[10px] font-mono text-red-300/80">{wolfMessages.length} ข้อความ</span>
+                        </div>
+                        <div className="max-h-[260px] overflow-y-auto p-2.5 space-y-2">
+                          {wolfMessages.length === 0 ? (
+                            <div className="text-xs text-red-200/75 text-center py-3">
+                              พิมพ์กระซิบวางแผนล่าเหยื่อกับเพื่อนหมาป่าได้เลย
+                            </div>
+                          ) : (
+                            wolfMessages.map((wm) => {
+                              const isMeWolf = Boolean(myPlayer && wm.senderId === myPlayer.id);
+                              return (
+                                <div
+                                  key={wm.id}
+                                  className={`flex flex-col ${isMeWolf ? 'items-end' : 'items-start'}`}
+                                >
+                                  <div className="flex items-center gap-1.5 px-1 mb-0.5 text-[10px]">
+                                    <span className="font-bold text-red-300">🐺 {wm.senderName}</span>
+                                    <span className="text-red-400/70 font-mono">{wm.timestamp}</span>
+                                  </div>
+                                  <div
+                                    className={`max-w-[88%] px-3 py-1.5 text-xs leading-relaxed whitespace-pre-line border ${
+                                      isMeWolf
+                                        ? 'bg-red-800/45 border-red-500/50 text-red-50 rounded-2xl rounded-tr-sm'
+                                        : 'bg-[#210F18] border-red-900/70 text-red-100 rounded-2xl rounded-tl-sm'
+                                    }`}
+                                  >
+                                    {wm.text}
+                                  </div>
+                                </div>
+                              );
+                            })
+                          )}
+                          {isGeneratingWolfAI && (
+                            <div className="rounded-xl px-3 py-1.5 bg-red-950/50 border border-red-800/60 text-xs text-red-200 flex items-center gap-2">
+                              <Sparkles className="w-3.5 h-3.5 animate-spin text-red-400" />
+                              <span>เพื่อนหมาป่ากำลังกระซิบตอบ...</span>
+                            </div>
+                          )}
+                        </div>
+                        {myPlayer?.alive && phase !== 'GAME_OVER' && (
+                          <form
+                            onSubmit={(e) => {
+                              e.preventDefault();
+                              handleSendWolfMessage();
+                            }}
+                            className="p-2 border-t border-red-900/60 bg-[#1B0B12] flex items-center gap-1.5"
+                          >
+                            <input
+                              type="text"
+                              value={wolfChatInput}
+                              onChange={(e) => setWolfChatInput(e.target.value)}
+                              placeholder="กระซิบกับเพื่อนหมาป่า..."
+                              disabled={isGeneratingWolfAI}
+                              className="flex-1 min-w-0 min-h-[40px] bg-slate-950/90 border border-red-900/70 focus:border-red-400 rounded-xl px-3 py-1 text-base text-white placeholder:text-red-300/40 outline-none select-text"
+                            />
+                            <button
+                              type="submit"
+                              disabled={!wolfChatInput.trim() || isGeneratingWolfAI}
+                              className="min-h-[40px] px-3 py-1 rounded-xl bg-red-600 hover:bg-red-500 disabled:opacity-40 text-white font-bold text-xs flex items-center gap-1 cursor-pointer shrink-0"
+                            >
+                              <Send className="w-3.5 h-3.5" />
+                              <span>กระซิบ</span>
+                            </button>
+                          </form>
+                        )}
+                      </div>
+                    )}
+
+                    {/* Quick Jump to Night Action / Players if Night Phase */}
+                    {phase === 'NIGHT_ACTION' && myPlayer?.alive && (
+                      <div className="rounded-xl bg-slate-900/90 border border-amber-500/35 p-3 space-y-2">
+                        <div className="text-xs font-bold text-amber-300">
+                          🌙 แอ็กชันคืนที่ {dayCount}
+                        </div>
+                        {myPlayer.role === 'VILLAGER' || myPlayer.role === 'BEGGAR' ? (
+                          <button
+                            type="button"
+                            onClick={handleConfirmNightAction}
+                            disabled={hasSubmittedNight && isMultiDeviceOnline}
+                            className="w-full min-h-[44px] py-2 px-4 rounded-xl bg-amber-500 hover:bg-amber-400 disabled:opacity-50 text-slate-950 font-bold text-xs cursor-pointer flex items-center justify-center gap-1.5"
+                          >
+                            <Moon className="w-4 h-4" />
+                            <span>เข้านอนและรอจนถึงรุ่งสาง (จบคืนที่ {dayCount})</span>
+                          </button>
+                        ) : (
+                          <button
+                            type="button"
+                            onClick={() => setMobileActiveTab('PLAYERS')}
+                            className="w-full min-h-[44px] py-2 px-4 rounded-xl bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-xs cursor-pointer flex items-center justify-center gap-1.5"
+                          >
+                            <Crosshair className="w-4 h-4" />
+                            <span>เลือกเป้าหมายสกิลในหน้าผู้เล่น (Tab 1)</span>
+                          </button>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                </div>
+              )}
+
               {/* Desktop ONLY: Left Side Player Roster Strip anchored at the bottom of the Village Canvas */}
               <div className="hidden md:flex md:flex-1 flex-col justify-end pointer-events-none">
                 <div className="pointer-events-auto bg-[#0B1324]/95 border border-slate-800/90 rounded-xl p-3 shadow-lg">
@@ -4061,8 +4626,17 @@ export default function App() {
                           }`}
                         >
                           <div className="flex items-center justify-between text-xs font-bold text-white truncate">
-                            <span className="truncate">
-                              {index + 1}. {p.shortName}
+                            <span className="truncate inline-flex items-center gap-1">
+                              <span>{index + 1}. {p.shortName}</span>
+                              {!p.isHuman && p.gender && (
+                                <span
+                                  className={`text-[10px] font-bold ${
+                                    p.gender === 'M' ? 'text-sky-400' : 'text-pink-400'
+                                  }`}
+                                >
+                                  {p.gender === 'M' ? '♂' : '♀'}
+                                </span>
+                              )}
                             </span>
                             {!p.alive ? (
                               <Skull className="w-3 h-3 text-red-400 shrink-0" />
@@ -4075,7 +4649,13 @@ export default function App() {
                               {p.alive
                                 ? p.revealedBeggar
                                   ? 'ยาจก (งดโหวต)'
+                                  : !p.isHuman
+                                  ? p.personaLabel
                                   : 'มีชีวิตอยู่'
+                                : p.deathCause === 'WOLF_KILL'
+                                ? 'โดนหมาป่าฆ่า'
+                                : p.deathCause === 'DAY_EXECUTION'
+                                ? 'โดนโหวตประหาร'
                                 : 'เสียชีวิตแล้ว'}
                             </span>
                             {p.alive &&
@@ -4132,21 +4712,27 @@ export default function App() {
                 </div>
               </div>
 
-              {/* Right Side (Full Height >=75% on Mobile): Clean LINE/Messenger-style Group Chat + Compact Sticky Bottom Action Bar */}
-              <div className="w-full md:w-[420px] lg:w-[480px] xl:w-[540px] flex-1 min-h-0 md:flex-none md:h-full flex flex-col pointer-events-auto bg-[#0A1120]/96 border border-slate-800/90 rounded-xl shadow-2xl overflow-hidden">
-                {amWerewolf ? (
-                  <div className="shrink-0 px-2 py-1.5 md:px-3 md:py-2 border-b border-slate-800 flex items-center gap-1.5 md:gap-2 bg-[#0F172A]">
+              {/* Tab 2 (Mobile) & Right Panel (Desktop): Authentic LINE Group Chat + Compact Sticky Bottom Action Bar */}
+              <div
+                className={`${
+                  mobileActiveTab === 'CHAT' ? 'flex' : 'hidden'
+                } md:flex w-full md:w-[420px] lg:w-[480px] xl:w-[540px] flex-1 min-h-0 md:flex-none md:h-full flex-col pointer-events-auto border border-slate-800/90 rounded-xl shadow-2xl overflow-hidden ${
+                  lineDarkMode ? 'bg-[#111827]' : 'bg-[#6383AF]'
+                }`}
+              >
+                {amWerewolf && (
+                  <div className="hidden md:flex shrink-0 px-3 py-2 border-b border-slate-800 items-center gap-2 bg-[#0F172A]">
                     <button
                       type="button"
                       onClick={() => setActiveChatTab('PUBLIC')}
-                      className={`flex-1 min-h-[36px] md:min-h-[40px] py-1 px-2 rounded-lg text-xs font-bold flex items-center justify-center gap-1.5 transition-colors cursor-pointer ${
+                      className={`flex-1 min-h-[38px] py-1 px-2 rounded-lg text-xs font-bold flex items-center justify-center gap-1.5 transition-colors cursor-pointer ${
                         activeChatTab === 'PUBLIC'
-                          ? 'bg-amber-500/20 text-amber-300 border border-amber-400/50'
+                          ? 'bg-[#06C755]/20 text-[#4ADE80] border border-[#06C755]/50'
                           : 'bg-slate-900/80 text-slate-400 border border-slate-800 hover:text-slate-200'
                       }`}
                     >
                       <MessageSquare className="w-3.5 h-3.5" />
-                      <span>สภาหมู่บ้าน ({visibleMessages.length})</span>
+                      <span>แชทกลาง LINE ({visibleMessages.length})</span>
                     </button>
                     <button
                       type="button"
@@ -4154,7 +4740,7 @@ export default function App() {
                         setActiveChatTab('WOLF');
                         setUnreadWolfCount(0);
                       }}
-                      className={`flex-1 min-h-[36px] md:min-h-[40px] py-1 px-2 rounded-lg text-xs font-bold flex items-center justify-center gap-1.5 transition-colors cursor-pointer relative ${
+                      className={`flex-1 min-h-[38px] py-1 px-2 rounded-lg text-xs font-bold flex items-center justify-center gap-1.5 transition-colors cursor-pointer relative ${
                         activeChatTab === 'WOLF'
                           ? 'bg-red-950/80 text-red-200 border border-red-500/60 shadow-[0_0_12px_rgba(239,68,68,0.2)]'
                           : 'bg-slate-900/80 text-red-300/80 border border-red-900/40 hover:border-red-500/50'
@@ -4168,19 +4754,6 @@ export default function App() {
                         </span>
                       )}
                     </button>
-                  </div>
-                ) : (
-                  /* Desktop ONLY Chat Header — hidden on mobile (< 768px) to maximize chat reading space */
-                  <div className="hidden md:flex shrink-0 px-4 py-2.5 border-b border-slate-800 items-center justify-between bg-[#0F172A]">
-                    <div className="flex items-center gap-2">
-                      <MessageSquare className="w-4 h-4 text-amber-400" />
-                      <h2 className="text-sm font-bold text-white">
-                        วงสนทนาสภาหมู่บ้าน
-                      </h2>
-                    </div>
-                    <span className="text-xs text-slate-400 font-mono tabular-nums">
-                      {visibleMessages.length} ข้อความ
-                    </span>
                   </div>
                 )}
 
@@ -4269,91 +4842,29 @@ export default function App() {
                     )}
                   </div>
                 ) : (
-                  /* Clean LINE/Messenger-Style Public Group Chat Feed */
-                  <div className="flex-1 min-h-0 overflow-y-auto px-2.5 py-2.5 md:px-4 md:py-3 space-y-2.5">
-                    {visibleMessages.map((m) => {
-                      const isMod = m.senderId === 'moderator';
-                      const isSecret = m.senderId === 'secret' || m.isSecret;
-                      const isMe = Boolean(myPlayer && m.senderId === myPlayer.id);
-
-                      if (isMod || isSecret) {
-                        return (
-                          <div
-                            key={m.id}
-                            className={`rounded-xl px-3 py-2 text-[13px] md:text-sm leading-relaxed border ${
-                              isSecret
-                                ? 'bg-amber-950/40 border-amber-500/40 text-amber-100'
-                                : 'bg-slate-900/90 border-slate-700/75 text-slate-100'
-                            }`}
-                          >
-                            <div className="flex items-center justify-between gap-2 text-[11px] mb-1">
-                              <span
-                                className={`font-bold ${
-                                  isSecret ? 'text-amber-300' : 'text-amber-400'
-                                }`}
-                              >
-                                {m.senderName}
-                              </span>
-                              <span className="font-mono tabular-nums text-[10px] text-slate-400 shrink-0">
-                                {m.phaseLabel}
-                              </span>
-                            </div>
-                            <div className="whitespace-pre-line select-text">
-                              {m.text}
-                            </div>
-                          </div>
-                        );
+                  /* Authentic LINE Group Chat Feed (Tab 2 on Mobile, Right Column on Desktop) */
+                  <LineGroupChatFeed
+                    messages={visibleMessages}
+                    players={players}
+                    myPlayer={myPlayer}
+                    phase={phase}
+                    dayCount={dayCount}
+                    lineDarkMode={lineDarkMode}
+                    onToggleLineDarkMode={() => setLineDarkMode((v) => !v)}
+                    isGeneratingAI={isGeneratingAI}
+                    typingBotName={typingBotName}
+                    typingBotPlayer={typingBotPlayer}
+                    aiError={aiError}
+                    isPendingVoteRetry={Boolean(pendingVoteRetryRef.current)}
+                    onRetryAI={() => {
+                      if (pendingVoteRetryRef.current) {
+                        void executeVoteResolution(pendingVoteRetryRef.current);
+                      } else {
+                        void handleContinueAIDebate();
                       }
-
-                      return (
-                        <div
-                          key={m.id}
-                          className={`flex flex-col ${
-                            isMe ? 'items-end' : 'items-start'
-                          }`}
-                        >
-                          <div
-                            className={`flex items-center gap-1.5 px-1 mb-0.5 text-[11px] ${
-                              isMe ? 'flex-row-reverse' : 'flex-row'
-                            }`}
-                          >
-                            <span
-                              className={`font-bold ${
-                                isMe ? 'text-sky-300' : 'text-slate-200'
-                              }`}
-                            >
-                              {m.senderName}
-                            </span>
-                            {m.tone && (
-                              <span className="text-[10px] text-amber-300/85">
-                                · {m.tone}
-                              </span>
-                            )}
-                            <span className="text-[10px] text-slate-500 font-mono tabular-nums">
-                              {m.timestamp}
-                            </span>
-                          </div>
-                          <div
-                            className={`max-w-[88%] px-3.5 py-2 text-[13.5px] md:text-sm leading-relaxed whitespace-pre-line select-text border ${
-                              isMe
-                                ? 'bg-sky-600/30 border-sky-400/45 text-sky-50 rounded-2xl rounded-tr-sm'
-                                : 'bg-[#152038] border-slate-700/80 text-slate-100 rounded-2xl rounded-tl-sm'
-                            }`}
-                          >
-                            {m.text}
-                          </div>
-                        </div>
-                      );
-                    })}
-
-                    {isGeneratingAI && (
-                      <div className="inline-flex items-center gap-2 rounded-2xl rounded-tl-sm px-3.5 py-2 bg-[#152038] border border-slate-700/80 text-xs text-amber-300">
-                        <Sparkles className="w-3.5 h-3.5 animate-spin" />
-                        <span>กำลังพิมพ์ตอบ...</span>
-                      </div>
-                    )}
-                    <div ref={chatEndRef} />
-                  </div>
+                    }}
+                    chatEndRef={chatEndRef}
+                  />
                 )}
 
                 {/* Compact Sticky Bottom Action Bar */}
@@ -4431,7 +4942,11 @@ export default function App() {
                                   <button
                                     type="button"
                                     onClick={() => {
-                                      setActiveChatTab('WOLF');
+                                      if (window.innerWidth < 768) {
+                                        setMobileActiveTab('ROLE');
+                                      } else {
+                                        setActiveChatTab('WOLF');
+                                      }
                                       setUnreadWolfCount(0);
                                     }}
                                     className="px-2 py-0.5 rounded bg-red-600/80 hover:bg-red-500 text-white text-[10px] font-bold cursor-pointer shrink-0"
@@ -4635,14 +5150,18 @@ export default function App() {
                                 type="text"
                                 value={humanInput}
                                 onChange={(e) => setHumanInput(e.target.value)}
-                                placeholder={`พิมพ์คุยหรือวิเคราะห์ในชื่อ "${myPlayer.shortName}"...`}
+                                placeholder={`พิมพ์ข้อความในกลุ่มในชื่อ "${myPlayer.shortName}"...`}
                                 disabled={isGeneratingAI}
-                                className="flex-1 min-w-0 min-h-[42px] bg-slate-900 border border-slate-700 focus:border-amber-400 rounded-xl px-3 py-1.5 text-base md:text-sm text-white placeholder:text-slate-500 outline-none select-text"
+                                className={`flex-1 min-w-0 min-h-[42px] rounded-full px-4 py-1.5 text-base md:text-sm outline-none select-text transition-colors ${
+                                  lineDarkMode
+                                    ? 'bg-slate-900 border border-slate-700 focus:border-[#06C755] text-white placeholder:text-slate-400'
+                                    : 'bg-white border border-slate-300 focus:border-[#06C755] text-slate-900 placeholder:text-slate-400'
+                                }`}
                               />
                               <button
                                 type="submit"
                                 disabled={!humanInput.trim() || isGeneratingAI}
-                                className="min-h-[42px] px-3.5 py-1.5 rounded-xl bg-amber-500/15 hover:bg-amber-500/25 border border-amber-500/40 disabled:opacity-40 text-amber-300 font-bold text-xs flex items-center gap-1 transition-colors cursor-pointer shrink-0"
+                                className="min-h-[42px] px-4 py-1.5 rounded-full bg-[#06C755] hover:bg-[#05b34c] disabled:opacity-40 text-white font-bold text-xs flex items-center gap-1 transition-colors cursor-pointer shrink-0 shadow-sm"
                               >
                                 <Send className="w-3.5 h-3.5" />
                                 <span>ส่ง</span>
@@ -4854,14 +5373,18 @@ export default function App() {
                             type="text"
                             value={humanInput}
                             onChange={(e) => setHumanInput(e.target.value)}
-                            placeholder={`คุยต่อก่อนเข้าคืนที่ ${dayCount + 1}...`}
+                            placeholder={`คุยต่อในกลุ่มก่อนเข้าคืนที่ ${dayCount + 1}...`}
                             disabled={isGeneratingAI}
-                            className="flex-1 min-w-0 min-h-[42px] bg-slate-900 border border-slate-700 focus:border-amber-400 rounded-xl px-3 py-1.5 text-base md:text-sm text-white placeholder:text-slate-500 outline-none select-text"
+                            className={`flex-1 min-w-0 min-h-[42px] rounded-full px-4 py-1.5 text-base md:text-sm outline-none select-text transition-colors ${
+                              lineDarkMode
+                                ? 'bg-slate-900 border border-slate-700 focus:border-[#06C755] text-white placeholder:text-slate-400'
+                                : 'bg-white border border-slate-300 focus:border-[#06C755] text-slate-900 placeholder:text-slate-400'
+                            }`}
                           />
                           <button
                             type="submit"
                             disabled={!humanInput.trim() || isGeneratingAI}
-                            className="min-h-[42px] px-3.5 py-1.5 rounded-xl bg-amber-500/15 hover:bg-amber-500/25 border border-amber-500/40 disabled:opacity-40 text-amber-300 font-bold text-xs flex items-center gap-1 transition-colors cursor-pointer shrink-0"
+                            className="min-h-[42px] px-4 py-1.5 rounded-full bg-[#06C755] hover:bg-[#05b34c] disabled:opacity-40 text-white font-bold text-xs flex items-center gap-1 transition-colors cursor-pointer shrink-0 shadow-sm"
                           >
                             <Send className="w-3.5 h-3.5" />
                             <span>ส่ง</span>
@@ -4926,6 +5449,76 @@ export default function App() {
                 </div>
               </div>
             </div>
+
+            {/* Mobile ONLY: 3-Tab Bottom Navigation Bar (Tab 1: Players/Voting, Tab 2: LINE Village Chat, Tab 3: Roles/Skills/Wolf Chat) */}
+            <nav
+              aria-label="เมนูหลักมือถือ"
+              className="md:hidden shrink-0 mt-1.5 pointer-events-auto grid grid-cols-3 bg-[#0B1324]/96 backdrop-blur-md border border-slate-800 rounded-xl p-1 shadow-2xl gap-1"
+            >
+              <button
+                type="button"
+                onClick={() => setMobileActiveTab('PLAYERS')}
+                className={`min-h-[46px] rounded-lg flex flex-col items-center justify-center gap-0.5 text-[11px] font-bold transition-colors cursor-pointer relative ${
+                  mobileActiveTab === 'PLAYERS'
+                    ? 'bg-amber-500/20 text-amber-300 border border-amber-400/45'
+                    : 'text-slate-400 hover:text-slate-200 border border-transparent'
+                }`}
+              >
+                <Users className="w-4 h-4" />
+                <span className="whitespace-nowrap">ผู้เล่น/โหวต</span>
+                {phase === 'DAY_VOTING' && myPlayer?.alive && myPlayer.canVote && !hasSubmittedVote && mobileActiveTab !== 'PLAYERS' && (
+                  <span className="absolute top-1 right-2 px-1 py-0 rounded bg-red-500 text-white text-[9px] font-bold">
+                    โหวต
+                  </span>
+                )}
+              </button>
+
+              <button
+                type="button"
+                onClick={() => {
+                  setMobileActiveTab('CHAT');
+                  setUnreadPublicCount(0);
+                }}
+                className={`min-h-[46px] rounded-lg flex flex-col items-center justify-center gap-0.5 text-[11px] font-bold transition-colors cursor-pointer relative ${
+                  mobileActiveTab === 'CHAT'
+                    ? 'bg-[#06C755]/20 text-[#4ADE80] border border-[#06C755]/55'
+                    : 'text-slate-400 hover:text-slate-200 border border-transparent'
+                }`}
+              >
+                <MessageSquare className="w-4 h-4" />
+                <span className="whitespace-nowrap">แชทกลาง</span>
+                {unreadPublicCount > 0 && mobileActiveTab !== 'CHAT' && (
+                  <span className="absolute top-1 right-2.5 min-w-[16px] h-[16px] px-1 rounded-full bg-[#06C755] text-white text-[9.5px] font-mono font-bold flex items-center justify-center">
+                    {unreadPublicCount > 99 ? '99+' : unreadPublicCount}
+                  </span>
+                )}
+              </button>
+
+              <button
+                type="button"
+                onClick={() => {
+                  setMobileActiveTab('ROLE');
+                  if (amWerewolf) setUnreadWolfCount(0);
+                }}
+                className={`min-h-[46px] rounded-lg flex flex-col items-center justify-center gap-0.5 text-[11px] font-bold transition-colors cursor-pointer relative ${
+                  mobileActiveTab === 'ROLE'
+                    ? amWerewolf
+                      ? 'bg-red-950/75 text-red-200 border border-red-500/55'
+                      : 'bg-amber-500/20 text-amber-300 border border-amber-400/45'
+                    : 'text-slate-400 hover:text-slate-200 border border-transparent'
+                }`}
+              >
+                {amWerewolf ? <Flame className="w-4 h-4 text-red-400" /> : <Shield className="w-4 h-4" />}
+                <span className="whitespace-nowrap">
+                  {amWerewolf ? 'บทบาท/ฝูง' : 'บทบาท/สกิล'}
+                </span>
+                {amWerewolf && unreadWolfCount > 0 && mobileActiveTab !== 'ROLE' && (
+                  <span className="absolute top-1 right-2.5 min-w-[16px] h-[16px] px-1 rounded-full bg-red-500 text-white text-[9.5px] font-mono font-bold flex items-center justify-center">
+                    {unreadWolfCount}
+                  </span>
+                )}
+              </button>
+            </nav>
           </div>
         )}
 
@@ -5121,12 +5714,26 @@ export default function App() {
                       key={p.id}
                       className="flex items-center justify-between px-3 py-2 rounded-lg bg-slate-900 border border-slate-800 text-xs"
                     >
-                      <div className="truncate">
+                      <div className="truncate flex items-center gap-1.5">
                         <span className="font-bold text-white">{p.name}</span>
-                        <span className="text-slate-500 mx-1.5" aria-hidden="true">
+                        {!p.isHuman && p.gender && (
+                          <span
+                            className={`text-[10px] font-bold ${
+                              p.gender === 'M' ? 'text-sky-400' : 'text-pink-400'
+                            }`}
+                          >
+                            {p.gender === 'M' ? '♂' : '♀'}
+                          </span>
+                        )}
+                        {!p.isHuman && (
+                          <span className="text-[10px] text-slate-400 truncate">
+                            ({p.personaLabel})
+                          </span>
+                        )}
+                        <span className="text-slate-500" aria-hidden="true">
                           ·
                         </span>
-                        <span className="text-slate-400">
+                        <span className="text-slate-400 shrink-0">
                           {p.alive ? 'รอดชีวิต' : 'เสียชีวิต'}
                         </span>
                       </div>
@@ -5148,7 +5755,7 @@ export default function App() {
                     <div className="flex items-center gap-2">
                       <MessageSquare className="w-4 h-4 text-amber-400" />
                       <h3 className="text-sm font-bold text-amber-300">
-                        เปิดใจหลังเฉลยบทบาท · ผู้เล่น AI คิดยังไงกันบ้าง (ชม / บ่น / แซว)
+                        เปิดใจหลังเฉลยบทบาท · แก๊ง AI เผากันสดๆ หลังจบเกม
                       </h3>
                     </div>
                     {!isGeneratingPostGame && postGameReactions.length > 0 && (
@@ -5161,7 +5768,20 @@ export default function App() {
                   {isGeneratingPostGame ? (
                     <div className="p-4 rounded-xl bg-slate-900/90 border border-amber-500/30 flex items-center justify-center gap-2.5 text-xs md:text-sm text-amber-200">
                       <Sparkles className="w-4 h-4 animate-spin text-amber-400" />
-                      <span>ผู้เล่น AI กำลังเปิดการ์ดดูบทบาททุกคนและพิมพ์เม้าท์หลังจบเกม...</span>
+                      <span>แก๊ง AI กำลังเปิดการ์ดดูบทบาททุกคนและพิมพ์เผาเพื่อนสดๆ...</span>
+                    </div>
+                  ) : postGameError ? (
+                    <div className="p-4 rounded-xl bg-red-950/50 border border-red-500/40 flex flex-wrap items-center justify-between gap-3 text-xs text-red-200">
+                      <span>⚠️ {postGameError}</span>
+                      {lastPostGameParamsRef.current && (
+                        <button
+                          type="button"
+                          onClick={() => void triggerPostGameDebrief(lastPostGameParamsRef.current)}
+                          className="px-3 py-1.5 rounded-lg bg-red-600 hover:bg-red-500 text-white font-bold text-xs cursor-pointer"
+                        >
+                          ลองเรียก AI เผาเพื่อนใหม่
+                        </button>
+                      )}
                     </div>
                   ) : postGameReactions.length > 0 ? (
                     <div className="space-y-2.5">
@@ -5181,10 +5801,24 @@ export default function App() {
                             className="p-3.5 rounded-xl bg-[#131D33] border border-slate-800 space-y-1.5"
                           >
                             <div className="flex flex-wrap items-center justify-between gap-2 text-xs">
-                              <div className="flex items-center gap-2 flex-wrap">
+                              <div className="flex items-center gap-1.5 flex-wrap">
                                 <span className="font-bold text-white">
                                   {r.speakerName}
                                 </span>
+                                {r.gender && (
+                                  <span
+                                    className={`text-[11px] font-bold ${
+                                      r.gender === 'M' ? 'text-sky-400' : 'text-pink-400'
+                                    }`}
+                                  >
+                                    {r.gender === 'M' ? '♂' : '♀'}
+                                  </span>
+                                )}
+                                {r.archetypeName && (
+                                  <span className="text-[10px] text-slate-400">
+                                    [{r.archetypeName}]
+                                  </span>
+                                )}
                                 <span
                                   className="font-semibold text-[11px]"
                                   style={{ color: ROLE_INFO[r.role].accentColor }}
