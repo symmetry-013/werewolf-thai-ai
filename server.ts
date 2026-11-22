@@ -136,6 +136,83 @@ function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise
 }
 
 const geminiModelCooldownUntil = new Map<string, number>();
+let discoveredGeminiModelsCache: { keyPrefix: string; models: string[]; fetchedAt: number } | null = null;
+
+async function discoverGeminiActiveModels(apiKey: string): Promise<string[]> {
+  const keyPrefix = apiKey.slice(0, 10);
+  if (
+    discoveredGeminiModelsCache &&
+    discoveredGeminiModelsCache.keyPrefix === keyPrefix &&
+    Date.now() - discoveredGeminiModelsCache.fetchedAt < 10 * 60 * 1000
+  ) {
+    return discoveredGeminiModelsCache.models;
+  }
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 6000);
+  try {
+    const res = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models?key=${encodeURIComponent(apiKey)}`,
+      { signal: controller.signal }
+    );
+    if (!res.ok) return [];
+    const json: any = await res.json();
+    const rawList: any[] = Array.isArray(json?.models) ? json.models : [];
+    const valid = rawList
+      .filter((m) => {
+        const methods: string[] = Array.isArray(m?.supportedGenerationMethods)
+          ? m.supportedGenerationMethods
+          : [];
+        if (!methods.includes("generateContent")) return false;
+        const name = String(m?.name || "").replace(/^models\//, "").toLowerCase();
+        if (!name.startsWith("gemini-")) return false;
+        // Strictly exclude deprecated and non-text-chat models
+        if (
+          name.startsWith("gemini-1.") ||
+          name.startsWith("gemini-2.0") ||
+          name === "gemini-pro" ||
+          name.includes("embedding") ||
+          name.includes("image") ||
+          name.includes("tts") ||
+          name.includes("live") ||
+          name.includes("audio") ||
+          name.includes("transcribe") ||
+          name.includes("translate") ||
+          name.includes("robotics") ||
+          name.includes("computer-use") ||
+          name.includes("deep-research") ||
+          name.includes("decision") ||
+          name.includes("omni")
+        ) {
+          return false;
+        }
+        return true;
+      })
+      .map((m) => String(m.name).replace(/^models\//, ""));
+
+    const scoreModel = (name: string): number => {
+      const n = name.toLowerCase();
+      if (n === "gemini-4-hydrogen") return 100;
+      if (n === "gemini-3.1-flash-lite") return 96;
+      if (n.includes("flash-lite")) return 90;
+      if (n.includes("flash") && !n.includes("thinking")) return 85;
+      if (n.startsWith("gemini-4-")) return 80;
+      if (n.startsWith("gemini-3")) return 75;
+      if (n.startsWith("gemini-2.5")) return 70;
+      return 40;
+    };
+
+    const sorted = Array.from(new Set(valid)).sort((a, b) => scoreModel(b) - scoreModel(a));
+    discoveredGeminiModelsCache = { keyPrefix, models: sorted, fetchedAt: Date.now() };
+    if (sorted.length > 0) {
+      console.log(`[Gemini] Auto-discovered accessible models: ${sorted.slice(0, 6).join(", ")}`);
+    }
+    return sorted;
+  } catch {
+    return [];
+  } finally {
+    clearTimeout(timer);
+  }
+}
 
 async function callGeminiProvider(params: {
   tier: "primary" | "fast";
@@ -160,86 +237,213 @@ async function callGeminiProvider(params: {
   // Prioritize configured primary/fast models with valid active fallbacks
   const preferPrimary =
     process.env.AI_PREFER_PRIMARY === "true" || params.tier === "primary";
-  const modelsToTry = preferPrimary
+  const baseModels = preferPrimary
     ? [cfg.primaryModel, cfg.fastModel, "gemini-4-hydrogen", "gemini-3.1-flash-lite"]
     : [cfg.fastModel, cfg.primaryModel, "gemini-3.1-flash-lite", "gemini-4-hydrogen"];
-  const uniqueModels = Array.from(new Set(modelsToTry.filter(Boolean)));
 
   const now = Date.now();
+  const baseUnique = Array.from(new Set(baseModels.filter(Boolean)));
+  const allBaseCooledDown = baseUnique.every(
+    (m) => (geminiModelCooldownUntil.get(m) || 0) > now
+  );
+
+  // If all default models hit 404/cooldown (e.g. external API key on Render), auto-discover active models
+  let modelsToTry = [...baseUnique];
+  if (allBaseCooledDown || (discoveredGeminiModelsCache && discoveredGeminiModelsCache.models.length > 0)) {
+    const discovered = await discoverGeminiActiveModels(cfg.apiKey);
+    modelsToTry = [...baseUnique, ...discovered];
+  }
+
+  const runGeminiModel = async (modelName: string, timeoutMs: number) => {
+    const lower = modelName.toLowerCase();
+    const isGemini4 = lower.startsWith("gemini-4-");
+    const config: any = {
+      systemInstruction: params.systemInstruction,
+      responseMimeType: "application/json",
+      responseSchema: params.responseSchema,
+      safetySettings: WEREWOLF_SAFETY_SETTINGS,
+    };
+    if (isGemini4) {
+      // Gemini 4 models use ThinkingLevel.LOW for snappy, smart banter and do NOT accept deprecated temperature
+      config.thinkingConfig = { thinkingLevel: ThinkingLevel.LOW };
+    } else {
+      config.temperature = 0.85;
+      if (params.maxOutputTokens) {
+        config.maxOutputTokens = params.maxOutputTokens;
+      }
+    }
+
+    const response = await withTimeout(
+      ai.models.generateContent({
+        model: modelName,
+        contents: params.userPrompt,
+        config,
+      }),
+      timeoutMs,
+      `gemini:${modelName}`
+    );
+    const textOut =
+      response.text ||
+      response.candidates?.[0]?.content?.parts
+        ?.map((p: any) => p.text || "")
+        .join("") ||
+      "";
+    if (!textOut.trim()) {
+      const finishReason = response.candidates?.[0]?.finishReason || "UNKNOWN";
+      throw new Error(`Empty AI response from ${modelName} (finishReason=${finishReason})`);
+    }
+    const parsed = extractJsonFromText(textOut);
+    geminiModelCooldownUntil.delete(modelName);
+    return { data: parsed, modelUsed: `gemini:${modelName}` };
+  };
+
+  const uniqueModels = Array.from(new Set(modelsToTry.filter(Boolean)));
   const readyModels = uniqueModels.filter(
-    (m) => (geminiModelCooldownUntil.get(m) || 0) <= now
+    (m) => (geminiModelCooldownUntil.get(m) || 0) <= Date.now()
   );
   const candidateModels = readyModels.length > 0 ? readyModels : uniqueModels;
 
   let lastErr: any = null;
-  for (let idx = 0; idx < candidateModels.length; idx++) {
-    const modelName = candidateModels[idx];
-    const hasMoreFallbacks =
-      idx < candidateModels.length - 1 || Boolean(params.hasBackupProviders);
-    const attemptTimeoutMs = hasMoreFallbacks
-      ? Math.min(AI_TIMEOUT_MS, 15000)
-      : AI_TIMEOUT_MS;
+  let sawNotFound = false;
+  const triedSet = new Set<string>();
 
-    try {
-      const lower = modelName.toLowerCase();
-      const isGemini4 = lower.startsWith("gemini-4-");
-      const config: any = {
-        systemInstruction: params.systemInstruction,
-        responseMimeType: "application/json",
-        responseSchema: params.responseSchema,
-        safetySettings: WEREWOLF_SAFETY_SETTINGS,
-      };
-      if (isGemini4) {
-        // Gemini 4 models use ThinkingLevel.LOW for snappy, smart banter and do NOT accept deprecated temperature
-        config.thinkingConfig = { thinkingLevel: ThinkingLevel.LOW };
-      } else {
-        config.temperature = 0.85;
-        if (params.maxOutputTokens) {
-          config.maxOutputTokens = params.maxOutputTokens;
+  const tryList = async (list: string[]) => {
+    for (let idx = 0; idx < list.length; idx++) {
+      const modelName = list[idx];
+      if (triedSet.has(modelName)) continue;
+      triedSet.add(modelName);
+
+      const hasMoreFallbacks =
+        idx < list.length - 1 || Boolean(params.hasBackupProviders);
+      const attemptTimeoutMs = hasMoreFallbacks
+        ? Math.min(AI_TIMEOUT_MS, 15000)
+        : AI_TIMEOUT_MS;
+
+      try {
+        return await runGeminiModel(modelName, attemptTimeoutMs);
+      } catch (err: any) {
+        lastErr = err;
+        const errMsg = String(err?.message || err);
+        const lowerErr = errMsg.toLowerCase();
+        if (lowerErr.includes("404") || lowerErr.includes("not found")) {
+          sawNotFound = true;
+          geminiModelCooldownUntil.set(modelName, Date.now() + 15 * 60 * 1000);
+        } else if (
+          lowerErr.includes("429") ||
+          lowerErr.includes("quota") ||
+          lowerErr.includes("resource_exhausted") ||
+          lowerErr.includes("timed out")
+        ) {
+          geminiModelCooldownUntil.set(modelName, Date.now() + 45 * 1000);
         }
+        console.warn(`[Gemini] ${modelName} failed: ${errMsg.slice(0, 180)}`);
       }
+    }
+    return null;
+  };
 
-      const response = await withTimeout(
-        ai.models.generateContent({
-          model: modelName,
-          contents: params.userPrompt,
-          config,
-        }),
-        attemptTimeoutMs,
-        `gemini:${modelName}`
-      );
-      const textOut =
-        response.text ||
-        response.candidates?.[0]?.content?.parts
-          ?.map((p: any) => p.text || "")
-          .join("") ||
-        "";
-      if (!textOut.trim()) {
-        const finishReason = response.candidates?.[0]?.finishReason || "UNKNOWN";
-        throw new Error(`Empty AI response from ${modelName} (finishReason=${finishReason})`);
-      }
-      const parsed = extractJsonFromText(textOut);
-      geminiModelCooldownUntil.delete(modelName);
-      return { data: parsed, modelUsed: `gemini:${modelName}` };
-    } catch (err: any) {
-      lastErr = err;
-      const errMsg = String(err?.message || err);
-      const lowerErr = errMsg.toLowerCase();
-      if (lowerErr.includes("404") || lowerErr.includes("not found")) {
-        geminiModelCooldownUntil.set(modelName, Date.now() + 10 * 60 * 1000);
-      } else if (
-        lowerErr.includes("429") ||
-        lowerErr.includes("quota") ||
-        lowerErr.includes("resource_exhausted") ||
-        lowerErr.includes("timed out")
-      ) {
-        geminiModelCooldownUntil.set(modelName, Date.now() + 45 * 1000);
-      }
-      console.warn(`[Gemini] ${modelName} failed: ${errMsg.slice(0, 180)}`);
+  const firstPass = await tryList(candidateModels.slice(0, 5));
+  if (firstPass) return firstPass;
+
+  // If 404 occurred and we haven't queried /v1beta/models yet, discover live models and retry immediately
+  if (sawNotFound) {
+    const discovered = await discoverGeminiActiveModels(cfg.apiKey);
+    const freshOnes = discovered.filter(
+      (m) => !triedSet.has(m) && (geminiModelCooldownUntil.get(m) || 0) <= Date.now()
+    );
+    if (freshOnes.length > 0) {
+      const secondPass = await tryList(freshOnes.slice(0, 4));
+      if (secondPass) return secondPass;
     }
   }
+
   throw lastErr || new Error("Gemini request failed");
 }
+
+const groqModelCooldownUntil = new Map<string, number>();
+let discoveredGroqModelsCache: { keyPrefix: string; models: string[]; fetchedAt: number } | null = null;
+
+async function discoverGroqChatModels(apiKey: string): Promise<string[]> {
+  const keyPrefix = apiKey.slice(0, 10);
+  if (
+    discoveredGroqModelsCache &&
+    discoveredGroqModelsCache.keyPrefix === keyPrefix &&
+    Date.now() - discoveredGroqModelsCache.fetchedAt < 10 * 60 * 1000
+  ) {
+    return discoveredGroqModelsCache.models;
+  }
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 6000);
+  try {
+    const res = await fetch("https://api.groq.com/openai/v1/models", {
+      signal: controller.signal,
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+      },
+    });
+    if (!res.ok) return [];
+    const json: any = await res.json();
+    const rawList: any[] = Array.isArray(json?.data) ? json.data : [];
+    const chatIds = rawList
+      .filter((m) => m && m.active !== false && typeof m.id === "string")
+      .map((m) => String(m.id).trim())
+      .filter((id) => {
+        const low = id.toLowerCase();
+        // Filter out audio, speech, safety guard, and embedding models
+        return !(
+          low.includes("whisper") ||
+          low.includes("tts") ||
+          low.includes("guard") ||
+          low.includes("embed") ||
+          low.includes("moderation") ||
+          low.includes("playai") ||
+          low.includes("orpheus") ||
+          low.includes("distil-whisper") ||
+          low.includes("allam")
+        );
+      });
+
+    // Prioritize fast, high-quality Thai-capable chat models on Groq
+    const scoreGroqModel = (id: string): number => {
+      const low = id.toLowerCase();
+      if (low.includes("llama-3.3-70b")) return 100;
+      if (low.includes("llama-4-maverick")) return 96;
+      if (low.includes("llama-4-scout")) return 94;
+      if (low.includes("gpt-oss-120b")) return 92;
+      if (low.includes("qwen3-32b") || low.includes("qwen-qwq")) return 90;
+      if (low.includes("kimi-k2")) return 88;
+      if (low.includes("llama-3.1-8b-instant")) return 86;
+      if (low.includes("gpt-oss-20b")) return 84;
+      if (low.includes("llama")) return 75;
+      if (low.includes("qwen") || low.includes("gemma") || low.includes("mistral")) return 70;
+      if (low.includes("compound")) return 35;
+      return 50;
+    };
+
+    const sorted = Array.from(new Set(chatIds)).sort(
+      (a, b) => scoreGroqModel(b) - scoreGroqModel(a)
+    );
+    discoveredGroqModelsCache = { keyPrefix, models: sorted, fetchedAt: Date.now() };
+    if (sorted.length > 0) {
+      console.log(`[Groq] Auto-discovered accessible chat models: ${sorted.slice(0, 6).join(", ")}`);
+    }
+    return sorted;
+  } catch {
+    return [];
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+const GROQ_FALLBACK_MODELS = [
+  "llama-3.3-70b-versatile",
+  "meta-llama/llama-4-scout-17b-16e-instruct",
+  "llama-3.1-8b-instant",
+  "openai/gpt-oss-120b",
+  "openai/gpt-oss-20b",
+  "qwen/qwen3-32b",
+];
 
 async function callOpenAICompatibleProvider(params: {
   provider: "openai" | "openrouter" | "groq" | "deepseek";
@@ -250,46 +454,54 @@ async function callOpenAICompatibleProvider(params: {
 }): Promise<{ data: any; modelUsed: string }> {
   let endpoint = "";
   let apiKey = "";
-  let model = "";
+  let candidateModels: string[] = [];
   const extraHeaders: Record<string, string> = {};
 
   if (params.provider === "openai") {
     endpoint = "https://api.openai.com/v1/chat/completions";
     apiKey = (process.env.OPENAI_API_KEY || "").trim();
-    model = (process.env.OPENAI_MODEL || "gpt-4o-mini").trim();
+    candidateModels = [(process.env.OPENAI_MODEL || "gpt-4o-mini").trim()];
   } else if (params.provider === "openrouter") {
     endpoint = "https://openrouter.ai/api/v1/chat/completions";
     apiKey = (process.env.OPENROUTER_API_KEY || "").trim();
-    model = (process.env.OPENROUTER_MODEL || "google/gemini-2.5-flash").trim();
+    candidateModels = [(process.env.OPENROUTER_MODEL || "google/gemini-2.5-flash").trim()];
     extraHeaders["HTTP-Referer"] = process.env.APP_URL || "https://render.com";
     extraHeaders["X-Title"] = "Ultimate Werewolf Thai";
   } else if (params.provider === "groq") {
     endpoint = "https://api.groq.com/openai/v1/chat/completions";
     apiKey = (process.env.GROQ_API_KEY || "").trim();
-    model = (process.env.GROQ_MODEL || "llama-3.3-70b-versatile").trim();
+    const envGroqModel = (process.env.GROQ_MODEL || "").trim();
+    const discovered = await discoverGroqChatModels(apiKey);
+    if (discovered.length > 0) {
+      // Only try envGroqModel first if it actually exists in the user's Groq account
+      candidateModels =
+        envGroqModel && discovered.includes(envGroqModel)
+          ? [envGroqModel, ...discovered.filter((m) => m !== envGroqModel)]
+          : discovered;
+    } else {
+      candidateModels = Array.from(
+        new Set([envGroqModel, ...GROQ_FALLBACK_MODELS].filter(Boolean))
+      );
+    }
+    const now = Date.now();
+    const ready = candidateModels.filter(
+      (m) => (groqModelCooldownUntil.get(m) || 0) <= now
+    );
+    candidateModels = (ready.length > 0 ? ready : candidateModels).slice(0, 5);
   } else {
     endpoint = "https://api.deepseek.com/chat/completions";
     apiKey = (process.env.DEEPSEEK_API_KEY || "").trim();
-    model = (process.env.DEEPSEEK_MODEL || "deepseek-chat").trim();
+    candidateModels = [(process.env.DEEPSEEK_MODEL || "deepseek-chat").trim()];
   }
 
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), AI_TIMEOUT_MS);
-
-  try {
-    const res = await fetch(endpoint, {
-      method: "POST",
-      signal: controller.signal,
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${apiKey}`,
-        ...extraHeaders,
-      },
-      body: JSON.stringify({
+  const sendRequest = async (model: string, useJsonResponseFormat: boolean) => {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), AI_TIMEOUT_MS);
+    try {
+      const payload: any = {
         model,
         temperature: 0.75,
         max_tokens: params.maxOutputTokens || 900,
-        response_format: { type: "json_object" },
         messages: [
           {
             role: "system",
@@ -297,23 +509,84 @@ async function callOpenAICompatibleProvider(params: {
           },
           { role: "user", content: params.userPrompt },
         ],
-      }),
-    });
+      };
+      if (useJsonResponseFormat) {
+        payload.response_format = { type: "json_object" };
+      }
 
-    if (!res.ok) {
-      const errText = await res.text().catch(() => "");
-      throw new Error(`${params.provider} HTTP ${res.status}: ${errText.slice(0, 200)}`);
+      const res = await fetch(endpoint, {
+        method: "POST",
+        signal: controller.signal,
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${apiKey}`,
+          ...extraHeaders,
+        },
+        body: JSON.stringify(payload),
+      });
+
+      if (!res.ok) {
+        const errText = await res.text().catch(() => "");
+        const err: any = new Error(
+          `${params.provider}(${model}) HTTP ${res.status}: ${errText.slice(0, 220)}`
+        );
+        err.status = res.status;
+        err.bodyText = errText;
+        throw err;
+      }
+
+      const json: any = await res.json();
+      const content = json?.choices?.[0]?.message?.content || "";
+      return {
+        data: extractJsonFromText(content),
+        modelUsed: `${params.provider}:${model}`,
+      };
+    } finally {
+      clearTimeout(timeoutId);
     }
+  };
 
-    const json: any = await res.json();
-    const content = json?.choices?.[0]?.message?.content || "";
-    return {
-      data: extractJsonFromText(content),
-      modelUsed: `${params.provider}:${model}`,
-    };
-  } finally {
-    clearTimeout(timeoutId);
+  let lastErr: any = null;
+  for (const model of candidateModels) {
+    try {
+      const result = await sendRequest(model, true);
+      if (params.provider === "groq") {
+        groqModelCooldownUntil.delete(model);
+      }
+      return result;
+    } catch (err: any) {
+      lastErr = err;
+      const errMsg = String(err?.message || err).toLowerCase();
+      // Some Groq/OpenAI-compatible models reject response_format=json_object (HTTP 400); retry cleanly as plain text JSON
+      if (
+        err?.status === 400 &&
+        (errMsg.includes("response_format") ||
+          errMsg.includes("json") ||
+          errMsg.includes("failed_generation"))
+      ) {
+        try {
+          const retryResult = await sendRequest(model, false);
+          if (params.provider === "groq") {
+            groqModelCooldownUntil.delete(model);
+          }
+          return retryResult;
+        } catch (retryErr: any) {
+          lastErr = retryErr;
+        }
+      }
+
+      if (params.provider === "groq") {
+        if (err?.status === 404 || errMsg.includes("model_not_found") || errMsg.includes("does not exist")) {
+          groqModelCooldownUntil.set(model, Date.now() + 15 * 60 * 1000);
+        } else if (err?.status === 429 || errMsg.includes("rate_limit")) {
+          groqModelCooldownUntil.set(model, Date.now() + 45 * 1000);
+        }
+        console.warn(`[Groq] ${model} failed: ${String(lastErr?.message || lastErr).slice(0, 180)}`);
+      }
+    }
   }
+
+  throw lastErr || new Error(`${params.provider} request failed`);
 }
 
 async function callAnthropicProvider(params: {
@@ -389,6 +662,7 @@ async function generateStructuredAIJson(params: {
   }
 
   let lastError: any = null;
+  const providerErrors: string[] = [];
   const maxPasses = orderedProviders.length === 1 ? 2 : 1;
 
   for (let pass = 0; pass < maxPasses; pass++) {
@@ -415,11 +689,16 @@ async function generateStructuredAIJson(params: {
         }
       } catch (err: any) {
         lastError = err;
+        const shortMsg = String(err?.message || err).slice(0, 160);
+        providerErrors.push(`[${provider}] ${shortMsg}`);
         console.error(`AI provider [${provider}] failed:`, err?.message || err);
       }
     }
   }
 
+  if (providerErrors.length > 1) {
+    throw new Error(`ทุก AI Provider ตอบไม่สำเร็จ: ${providerErrors.join(" | ")}`);
+  }
   throw lastError || new Error("ไม่สามารถเชื่อมต่อ LLM API ได้ในขณะนี้");
 }
 
@@ -441,6 +720,7 @@ const SOURCE_FILES = [
   "src/App.tsx",
   "src/data/werewolfEngine.ts",
   "src/components/VillageCanvas.tsx",
+  "src/components/LineGroupChatFeed.tsx",
   "src/components/DeathAnimationOverlay.tsx",
   "src/components/BodyguardAnimationOverlay.tsx",
   "src/components/AnnouncementBannerOverlay.tsx",
