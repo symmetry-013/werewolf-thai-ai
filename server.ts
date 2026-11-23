@@ -58,7 +58,7 @@ function getGeminiConfig() {
 function getConfiguredProviders(): AIProviderName[] {
   const orderEnv =
     process.env.AI_PROVIDER_ORDER ||
-    "gemini,groq,openrouter,openai,deepseek,anthropic";
+    "groq,gemini,openrouter,openai,deepseek,anthropic";
   const requested = orderEnv
     .split(",")
     .map((s) => s.trim().toLowerCase() as AIProviderName);
@@ -329,6 +329,10 @@ async function callGeminiProvider(params: {
           sawNotFound = true;
           geminiModelCooldownUntil.set(modelName, Date.now() + 15 * 60 * 1000);
         } else if (
+          lowerErr.includes("503") ||
+          lowerErr.includes("unavailable") ||
+          lowerErr.includes("high demand") ||
+          lowerErr.includes("overloaded") ||
           lowerErr.includes("429") ||
           lowerErr.includes("quota") ||
           lowerErr.includes("resource_exhausted") ||
@@ -470,10 +474,9 @@ async function callOpenAICompatibleProvider(params: {
   } else if (params.provider === "groq") {
     endpoint = "https://api.groq.com/openai/v1/chat/completions";
     apiKey = (process.env.GROQ_API_KEY || "").trim();
-    const envGroqModel = (process.env.GROQ_MODEL || "").trim();
+    const envGroqModel = (process.env.GROQ_MODEL || "llama-3.3-70b-versatile").trim();
     const discovered = await discoverGroqChatModels(apiKey);
     if (discovered.length > 0) {
-      // Only try envGroqModel first if it actually exists in the user's Groq account
       candidateModels =
         envGroqModel && discovered.includes(envGroqModel)
           ? [envGroqModel, ...discovered.filter((m) => m !== envGroqModel)]
@@ -498,10 +501,19 @@ async function callOpenAICompatibleProvider(params: {
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), AI_TIMEOUT_MS);
     try {
+      const lowerModel = model.toLowerCase();
+      const isReasoningGroq =
+        params.provider === "groq" &&
+        (lowerModel.includes("gpt-oss") ||
+          lowerModel.includes("qwen3") ||
+          lowerModel.includes("qwq") ||
+          lowerModel.includes("deepseek-r1"));
       const payload: any = {
         model,
         temperature: 0.75,
-        max_tokens: params.maxOutputTokens || 900,
+        max_tokens: isReasoningGroq
+          ? Math.max(params.maxOutputTokens || 900, 1200)
+          : params.maxOutputTokens || 900,
         messages: [
           {
             role: "system",
@@ -510,6 +522,11 @@ async function callOpenAICompatibleProvider(params: {
           { role: "user", content: params.userPrompt },
         ],
       };
+      if (isReasoningGroq && lowerModel.includes("gpt-oss")) {
+        payload.reasoning_effort = "low";
+      } else if (isReasoningGroq && lowerModel.includes("qwen3")) {
+        payload.reasoning_format = "hidden";
+      }
       if (useJsonResponseFormat) {
         payload.response_format = { type: "json_object" };
       }
@@ -2212,6 +2229,8 @@ async function startServer() {
 
   function sanitizeSingleBotReply(raw: string, bot: any): string {
     let cleaned = String(raw || "").trim();
+    // Strip reasoning <think>...</think> tags if emitted by Qwen/DeepSeek models
+    cleaned = cleaned.replace(/<think>[\s\S]*?<\/think>/gi, "").trim();
     // Strip markdown code fences or JSON wrappers if a model accidentally wraps it
     cleaned = cleaned.replace(/^```[\s\S]*?\n|```$/g, "").trim();
     if (cleaned.startsWith("{") && cleaned.endsWith("}")) {
@@ -2237,8 +2256,8 @@ async function startServer() {
   }
 
   // Single-Bot AI Caller:
-  // 1) Groq (GROQ_MODEL, 8s timeout, max_tokens: 100)
-  // 2) Failover immediately to Gemini (GEMINI_MODEL_PRIMARY) on timeout / 429 / error
+  // 1) Groq (GROQ_MODEL="llama-3.3-70b-versatile", 8s timeout, max_tokens: 100)
+  // 2) Failover immediately to Gemini (GEMINI_MODEL_PRIMARY="gemini-4-hydrogen") on timeout / 429 / 503 / error
   // 3) Failover to LOCAL_FALLBACK_BANK if both APIs fail
   async function callBotSingleReplyAI(params: {
     bot: any;
@@ -2255,7 +2274,7 @@ async function startServer() {
     // --- Step 1: Try GROQ_MODEL first (strict 8,000ms timeout & max_tokens: 100) ---
     const groqApiKey = (process.env.GROQ_API_KEY || "").trim();
     if (isValidKey(groqApiKey)) {
-      const envGroqModel = (process.env.GROQ_MODEL || "").trim();
+      const envGroqModel = (process.env.GROQ_MODEL || "llama-3.3-70b-versatile").trim();
       const discovered = await discoverGroqChatModels(groqApiKey);
       let groqCandidates: string[] = [];
       if (discovered.length > 0) {
@@ -2277,6 +2296,29 @@ async function startServer() {
         const controller = new AbortController();
         const timer = setTimeout(() => controller.abort(), 8000);
         try {
+          const lowerModel = model.toLowerCase();
+          const isReasoningModel =
+            lowerModel.includes("gpt-oss") ||
+            lowerModel.includes("qwen3") ||
+            lowerModel.includes("qwq") ||
+            lowerModel.includes("deepseek-r1");
+          const reqBody: any = {
+            model,
+            temperature: 0.85,
+            // Standard chat models (e.g. llama-3.3-70b-versatile) stay strictly at max_tokens: 100.
+            // Reasoning models need slightly more room so internal thinking does not starve final content.
+            max_tokens: isReasoningModel ? 320 : 100,
+            messages: [
+              { role: "system", content: systemPrompt },
+              { role: "user", content: userPrompt },
+            ],
+          };
+          if (isReasoningModel && lowerModel.includes("gpt-oss")) {
+            reqBody.reasoning_effort = "low";
+          } else if (isReasoningModel && lowerModel.includes("qwen3")) {
+            reqBody.reasoning_format = "hidden";
+          }
+
           const res = await fetch("https://api.groq.com/openai/v1/chat/completions", {
             method: "POST",
             signal: controller.signal,
@@ -2284,15 +2326,7 @@ async function startServer() {
               "Content-Type": "application/json",
               Authorization: `Bearer ${groqApiKey}`,
             },
-            body: JSON.stringify({
-              model,
-              temperature: 0.85,
-              max_tokens: 100,
-              messages: [
-                { role: "system", content: systemPrompt },
-                { role: "user", content: userPrompt },
-              ],
-            }),
+            body: JSON.stringify(reqBody),
           });
           if (!res.ok) {
             const errBody = await res.text().catch(() => "");
@@ -2305,7 +2339,9 @@ async function startServer() {
               console.warn(`[BotQueue] Groq ${model} 429 Rate Limit -> Failover to Gemini`);
               break; // immediate failover to Gemini on 429
             }
-            console.warn(`[BotQueue] Groq ${model} HTTP ${res.status} -> Failover to Gemini`);
+            console.warn(
+              `[BotQueue] Groq ${model} HTTP ${res.status}: ${errBody.slice(0, 120)} -> Failover to Gemini`
+            );
             break;
           }
           const json: any = await res.json();
@@ -2316,6 +2352,7 @@ async function startServer() {
             usedTexts.add(cleaned);
             return { text: cleaned, tone: defaultTone, modelUsed: `groq:${model}` };
           }
+          console.warn(`[BotQueue] Groq ${model} returned empty content -> trying next model`);
         } catch (err: any) {
           console.warn(
             `[BotQueue] Groq ${model} failed/timeout (>8s): ${String(err?.message || err).slice(0, 120)} -> Failover to Gemini`
@@ -2327,7 +2364,7 @@ async function startServer() {
       }
     }
 
-    // --- Step 2: Failover to GEMINI_MODEL_PRIMARY ---
+    // --- Step 2: Failover to GEMINI_MODEL_PRIMARY (gemini-4-hydrogen -> gemini-3.1-flash-lite) ---
     const geminiCfg = getGeminiConfig();
     if (geminiCfg) {
       try {
@@ -2352,7 +2389,7 @@ async function startServer() {
           candidates = discovered.filter((m) => (geminiModelCooldownUntil.get(m) || 0) <= now);
         }
 
-        for (const modelName of (candidates.length > 0 ? candidates : baseList).slice(0, 2)) {
+        for (const modelName of (candidates.length > 0 ? candidates : baseList).slice(0, 3)) {
           try {
             const isGemini4 = modelName.toLowerCase().startsWith("gemini-4-");
             const config: any = {
@@ -2388,7 +2425,15 @@ async function startServer() {
             const gMsg = String(gErr?.message || gErr).toLowerCase();
             if (gMsg.includes("404") || gMsg.includes("not found")) {
               geminiModelCooldownUntil.set(modelName, Date.now() + 15 * 60 * 1000);
-            } else if (gMsg.includes("429") || gMsg.includes("quota") || gMsg.includes("timed out")) {
+            } else if (
+              gMsg.includes("503") ||
+              gMsg.includes("unavailable") ||
+              gMsg.includes("high demand") ||
+              gMsg.includes("overloaded") ||
+              gMsg.includes("429") ||
+              gMsg.includes("quota") ||
+              gMsg.includes("timed out")
+            ) {
               geminiModelCooldownUntil.set(modelName, Date.now() + 45 * 1000);
             }
             console.warn(`[BotQueue] Gemini ${modelName} failed: ${String(gErr?.message || gErr).slice(0, 140)}`);
@@ -3238,13 +3283,15 @@ ${(recentTranscript || []).slice(-12).join("\n") || "(คืนแรก ยั�
   httpServer.listen(PORT, "0.0.0.0", () => {
     const activeProviders = getConfiguredProviders();
     const geminiCfg = getGeminiConfig();
+    const groqModel = (process.env.GROQ_MODEL || "llama-3.3-70b-versatile").trim();
+    const hasGroq = isValidKey(process.env.GROQ_API_KEY);
     console.log(`Ultimate Werewolf Server running on port ${PORT}`);
     console.log(
       `Active AI providers: ${
         activeProviders.length > 0 ? activeProviders.join(", ") : "local-engine-only"
-      }${
+      }${hasGroq ? ` | Groq Primary: ${groqModel}` : ""}${
         geminiCfg
-          ? ` (Gemini Primary: ${geminiCfg.primaryModel}, Fast: ${geminiCfg.fastModel})`
+          ? ` | Gemini Fallback: ${geminiCfg.primaryModel} (Fast: ${geminiCfg.fastModel})`
           : ""
       }`
     );

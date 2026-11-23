@@ -9,15 +9,19 @@ services:
     envVars:
       - key: NODE_ENV
         value: production
+      - key: GROQ_API_KEY
+        sync: false
+      - key: GROQ_MODEL
+        value: llama-3.3-70b-versatile
       - key: GEMINI_API_KEY
         sync: false
       - key: GEMINI_MODEL_PRIMARY
-        value: gemini-3.5-flash-lite
+        value: gemini-4-hydrogen
       - key: GEMINI_MODEL_FAST
-        value: gemini-3.5-flash-lite
+        value: gemini-3.1-flash-lite
       - key: AI_TIMEOUT_MS
         value: "20000"
       - key: AI_PROVIDER_ORDER
-        value: gemini,groq,openrouter,openai,deepseek,anthropic
+        value: groq,gemini,openrouter,openai,deepseek,anthropic
       - key: AI_MIX_PROVIDERS
         value: "false"
