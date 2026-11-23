@@ -11,12 +11,15 @@ import {
   EyeOff,
   FileCode,
   Flame,
+  KeyRound,
   Link2,
+  LogIn,
   MessageSquare,
   Moon,
   Pause,
   Play,
   RotateCcw,
+  Search,
   Send,
   Shield,
   Shuffle,
@@ -80,6 +83,7 @@ interface RoomPreviewInfo {
   roomId: string;
   totalPlayers: number;
   humanCount: number;
+  onlineCount?: number;
   maxHumans: number;
   participants: { id: string; name: string; isOnline: boolean }[];
   gameStarted: boolean;
@@ -174,7 +178,14 @@ export default function App() {
   ]);
   const [newFriendNameInput, setNewFriendNameInput] = useState<string>('');
   const [copiedInviteLink, setCopiedInviteLink] = useState<boolean>(false);
+  const [copiedRoomCode, setCopiedRoomCode] = useState<boolean>(false);
+  const [roomCodeInput, setRoomCodeInput] = useState<string>('');
+  const [isSearchingRoom, setIsSearchingRoom] = useState<boolean>(false);
+  const [roomSearchResult, setRoomSearchResult] = useState<RoomPreviewInfo | null>(null);
+  const [roomSearchError, setRoomSearchError] = useState<string | null>(null);
+  const [roomJoinNotice, setRoomJoinNotice] = useState<string | null>(null);
   const [wsConnected, setWsConnected] = useState<boolean>(false);
+  const roomCodeInputRef = useRef<HTMLInputElement | null>(null);
 
   const [players, setPlayers] = useState<Player[]>(() =>
     createInitialPlayers({
@@ -341,21 +352,144 @@ export default function App() {
     setShellState('TITLE_SCREEN');
   };
 
-  const handleCreateOwnNewRoom = () => {
-    const newCode = 'WOLF' + Math.floor(100 + Math.random() * 900).toString();
+  const parseRoomCodeInput = (raw: string): string => {
+    const trimmed = raw.trim();
+    if (!trimmed) return '';
+    // Support pasting full invite URLs like https://.../?room=WOLF123
+    const urlMatch = trimmed.match(/[?&]room=([a-zA-Z0-9_-]+)/i);
+    if (urlMatch?.[1]) {
+      return urlMatch[1].trim().toUpperCase().slice(0, 16);
+    }
+    return trimmed
+      .replace(/^#+/, '')
+      .replace(/\s+/g, '')
+      .toUpperCase()
+      .slice(0, 16);
+  };
+
+  const handleCopyRoomCode = () => {
+    navigator.clipboard.writeText(roomId).catch(() => {});
+    setCopiedRoomCode(true);
+    setTimeout(() => setCopiedRoomCode(false), 2200);
+  };
+
+  const switchToTargetRoom = (targetCode: string, isCreatingOwn = false) => {
+    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+      try {
+        wsRef.current.send(
+          JSON.stringify({
+            type: 'LEAVE_ROOM',
+            roomId,
+            playerId: myClientId,
+          })
+        );
+      } catch {
+        // Ignore send error during switch
+      }
+    }
     try {
       const url = new URL(window.location.href);
-      url.searchParams.set('room', newCode);
+      url.searchParams.set('room', targetCode);
       window.history.replaceState({}, '', url.toString());
-      window.sessionStorage.setItem('werewolf_joined_room', newCode);
+      window.sessionStorage.setItem('werewolf_joined_room', targetCode);
     } catch {
       // Ignore
     }
-    setRoomId(newCode);
+    setRoomId(targetCode);
     setRoomFullError(false);
-    setHostId(myClientId);
+    setRoomSearchResult(null);
+    setRoomSearchError(null);
+    setRoomCodeInput('');
+    setHostId(isCreatingOwn ? myClientId : null);
+    setHumanParticipants([
+      {
+        id: myClientId,
+        name: myNameRef.current.trim() || 'ผู้เล่น 1',
+        isOnline: true,
+      },
+    ]);
+    setMessages([]);
+    setVotes([]);
+    setPhaseReadyIds([]);
+    setNightReadyIds([]);
+    setVoteReadyIds([]);
+    setWolfMessages([]);
+    setWolfSignals({});
+    setPhaseDeadlineAt(null);
     setHasJoinedRoom(true);
     setShellState('TITLE_SCREEN');
+    setRoomJoinNotice(
+      isCreatingOwn
+        ? `สร้างห้องใหม่ #${targetCode} เรียบร้อยแล้ว ส่งรหัสนี้ให้เพื่อนเข้าห้องได้เลย!`
+        : `เข้าร่วมห้อง #${targetCode} สำเร็จแล้ว!`
+    );
+    setTimeout(() => setRoomJoinNotice(null), 3500);
+  };
+
+  const handleSearchRoomByCode = async (e?: React.FormEvent, autoJoinIfFound = false) => {
+    if (e) e.preventDefault();
+    const cleanedCode = parseRoomCodeInput(roomCodeInput);
+    if (!cleanedCode) {
+      setRoomSearchError('กรุณาใส่รหัสห้องของเพื่อนก่อน เช่น WOLF123');
+      setRoomSearchResult(null);
+      roomCodeInputRef.current?.focus();
+      return;
+    }
+    if (cleanedCode === roomId) {
+      setRoomSearchError(`คุณอยู่ในห้อง #${roomId} อยู่แล้ว`);
+      setRoomSearchResult(null);
+      return;
+    }
+
+    setIsSearchingRoom(true);
+    setRoomSearchError(null);
+    setRoomSearchResult(null);
+
+    try {
+      const res = await fetch(`/api/rooms/${encodeURIComponent(cleanedCode)}`);
+      const data: RoomPreviewInfo = await res.json();
+      if (!res.ok || !data.exists) {
+        setRoomSearchError(
+          `ไม่พบห้อง #${cleanedCode} ในระบบ — กรุณาตรวจสอบรหัสห้องจากเพื่อนอีกครั้ง`
+        );
+        return;
+      }
+      if (data.isFull) {
+        setRoomSearchResult(data);
+        setRoomSearchError(`ห้อง #${cleanedCode} มีผู้เล่นครบ ${data.maxHumans}/${data.maxHumans} คนแล้ว`);
+        return;
+      }
+      if (autoJoinIfFound) {
+        if (!myName.trim()) {
+          setRoomSearchResult(data);
+          setRoomSearchError('กรุณาตั้งชื่อเล่นของคุณในช่องที่ 1 ก่อนกดเข้าห้อง');
+          player1NameInputRef.current?.focus();
+          return;
+        }
+        switchToTargetRoom(data.roomId, false);
+        return;
+      }
+      setRoomSearchResult(data);
+    } catch {
+      setRoomSearchError('เชื่อมต่อเซิร์ฟเวอร์ค้นหาห้องไม่สำเร็จ กรุณาลองใหม่อีกครั้ง');
+    } finally {
+      setIsSearchingRoom(false);
+    }
+  };
+
+  const handleConfirmJoinSearchedRoom = () => {
+    if (!roomSearchResult || !roomSearchResult.exists || roomSearchResult.isFull) return;
+    if (!myName.trim()) {
+      setRoomSearchError('กรุณาตั้งชื่อเล่นของคุณในช่องที่ 1 ก่อนกดเข้าห้อง');
+      player1NameInputRef.current?.focus();
+      return;
+    }
+    switchToTargetRoom(roomSearchResult.roomId, false);
+  };
+
+  const handleCreateOwnNewRoom = () => {
+    const newCode = 'WOLF' + Math.floor(100 + Math.random() * 900).toString();
+    switchToTargetRoom(newCode, true);
   };
 
   // Broadcast helper over WebSocket
@@ -3509,10 +3643,27 @@ export default function App() {
         <div className="absolute inset-0 z-30 flex flex-col justify-between p-4 md:p-8 bg-gradient-to-t from-[#050811]/95 via-[#070C18]/85 to-[#050811]/90 pointer-events-auto overflow-y-auto">
           {/* Top Bar */}
           <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-slate-400">
-            <div className="flex items-center gap-2 font-mono tabular-nums">
+            <div className="flex flex-wrap items-center gap-2 font-mono tabular-nums">
               <span className="text-amber-400 font-semibold">ULTIMATE WEREWOLF THAI</span>
               <span aria-hidden="true">·</span>
-              <span>ห้อง #{roomId}</span>
+              <span className="text-white font-bold">ห้อง #{roomId}</span>
+              <button
+                type="button"
+                onClick={handleCopyRoomCode}
+                className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-amber-500/15 border border-amber-500/40 text-amber-300 hover:bg-amber-500/25 transition-colors cursor-pointer font-sans text-[11px] font-semibold"
+              >
+                {copiedRoomCode ? (
+                  <>
+                    <Check className="w-3 h-3 text-emerald-400" />
+                    <span className="text-emerald-300">คัดลอกรหัสแล้ว</span>
+                  </>
+                ) : (
+                  <>
+                    <Copy className="w-3 h-3" />
+                    <span>คัดลอกรหัส</span>
+                  </>
+                )}
+              </button>
               <span aria-hidden="true">·</span>
               <span className={wsConnected ? 'text-emerald-400' : 'text-slate-400'}>
                 {wsConnected
@@ -3520,7 +3671,18 @@ export default function App() {
                   : 'โหมดเล่นทันที'}
               </span>
             </div>
-            <div className="flex items-center gap-2">
+            <div className="flex flex-wrap items-center gap-2">
+              <button
+                type="button"
+                onClick={() => {
+                  roomCodeInputRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                  roomCodeInputRef.current?.focus();
+                }}
+                className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-emerald-500/20 border border-emerald-500/50 text-emerald-300 hover:bg-emerald-500/30 transition-colors cursor-pointer font-semibold"
+              >
+                <LogIn className="w-4 h-4" />
+                <span>เข้าห้องด้วยรหัสห้อง</span>
+              </button>
               <button
                 onClick={openDownloadModal}
                 className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-amber-500/20 border border-amber-500/50 text-amber-300 hover:bg-amber-500/30 transition-colors cursor-pointer font-semibold"
@@ -3550,6 +3712,168 @@ export default function App() {
               <p className="text-xs md:text-sm text-slate-300 max-w-2xl mx-auto">
                 ส่งลิงก์ให้เพื่อนเปิดตั้งชื่อเล่นเข้าร่วมได้ทันที (สูงสุด 10 คนจริง) ที่นั่งที่เหลือระบบจะสุ่ม AI มาเล่นและวิเคราะห์ร่วมโต๊ะให้อย่างเป็นธรรมชาติ
               </p>
+            </div>
+
+            {/* Room Code Display + Search & Join Friend's Room by Code */}
+            <div className="bg-[#0B1324]/95 border border-emerald-500/35 rounded-2xl p-4 shadow-xl space-y-3">
+              <div className="flex flex-col md:flex-row md:items-center justify-between gap-3">
+                {/* Current Room Code */}
+                <div className="flex flex-wrap items-center gap-2">
+                  <div className="flex items-center gap-1.5 text-xs font-bold text-slate-300">
+                    <KeyRound className="w-4 h-4 text-amber-400" />
+                    <span>รหัสห้องปัจจุบัน:</span>
+                  </div>
+                  <span className="px-3 py-1 rounded-lg bg-amber-500/15 border border-amber-500/50 font-mono font-extrabold text-sm tracking-wider text-amber-300 select-all">
+                    {roomId}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={handleCopyRoomCode}
+                    className="px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-xs font-semibold text-slate-200 flex items-center gap-1 cursor-pointer transition-colors"
+                  >
+                    {copiedRoomCode ? (
+                      <>
+                        <Check className="w-3.5 h-3.5 text-emerald-400" />
+                        <span className="text-emerald-300">คัดลอกแล้ว</span>
+                      </>
+                    ) : (
+                      <>
+                        <Copy className="w-3.5 h-3.5 text-amber-300" />
+                        <span>คัดลอกรหัส</span>
+                      </>
+                    )}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleCreateOwnNewRoom}
+                    className="px-2.5 py-1.5 rounded-lg bg-slate-900 hover:bg-slate-800 border border-slate-700 text-[11px] font-semibold text-slate-300 hover:text-white cursor-pointer transition-colors"
+                  >
+                    สร้างห้องใหม่
+                  </button>
+                </div>
+
+                {/* Search & Join by Room Code Form */}
+                <form
+                  onSubmit={(e) => handleSearchRoomByCode(e, false)}
+                  className="flex flex-wrap sm:flex-nowrap items-center gap-2 flex-1 md:max-w-lg"
+                >
+                  <div className="relative flex-1 min-w-[160px]">
+                    <Search className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" />
+                    <input
+                      ref={roomCodeInputRef}
+                      type="text"
+                      value={roomCodeInput}
+                      onChange={(e) => {
+                        setRoomCodeInput(e.target.value.toUpperCase());
+                        if (roomSearchError) setRoomSearchError(null);
+                      }}
+                      placeholder="ใส่รหัสห้องเพื่อน เช่น WOLF123..."
+                      maxLength={48}
+                      className="w-full min-h-[42px] bg-[#0F172A] border border-slate-700 focus:border-emerald-400 rounded-xl pl-9 pr-3 py-2 text-sm font-mono font-bold text-white placeholder:font-sans placeholder:font-normal placeholder:text-slate-500 outline-none select-text"
+                    />
+                  </div>
+                  <button
+                    type="submit"
+                    disabled={isSearchingRoom || !roomCodeInput.trim()}
+                    className="min-h-[42px] px-3.5 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 disabled:opacity-40 border border-slate-600 text-xs font-bold text-white flex items-center gap-1.5 shrink-0 cursor-pointer transition-colors"
+                  >
+                    <Search className="w-3.5 h-3.5 text-amber-300" />
+                    <span>{isSearchingRoom ? 'กำลังค้นหา...' : 'ค้นหาห้อง'}</span>
+                  </button>
+                  <button
+                    type="button"
+                    disabled={isSearchingRoom || !roomCodeInput.trim()}
+                    onClick={() => handleSearchRoomByCode(undefined, true)}
+                    className="min-h-[42px] px-3.5 py-2 rounded-xl bg-emerald-500 hover:bg-emerald-400 disabled:opacity-40 text-slate-950 text-xs font-extrabold flex items-center gap-1.5 shrink-0 cursor-pointer transition-colors shadow-[0_0_16px_rgba(16,185,129,0.25)]"
+                  >
+                    <LogIn className="w-3.5 h-3.5" />
+                    <span>เข้าห้องด้วยรหัส</span>
+                  </button>
+                </form>
+              </div>
+
+              {/* Join Success Toast Banner */}
+              {roomJoinNotice && (
+                <div className="px-3 py-2 rounded-xl bg-emerald-950/60 border border-emerald-500/40 text-emerald-200 text-xs font-semibold flex items-center gap-2">
+                  <Check className="w-4 h-4 text-emerald-400 shrink-0" />
+                  <span>{roomJoinNotice}</span>
+                </div>
+              )}
+
+              {/* Room Search Error */}
+              {roomSearchError && (
+                <div className="px-3 py-2 rounded-xl bg-red-950/50 border border-red-500/40 text-red-200 text-xs font-semibold flex items-center justify-between gap-2">
+                  <span>{roomSearchError}</span>
+                  <button
+                    type="button"
+                    onClick={() => setRoomSearchError(null)}
+                    className="text-red-300 hover:text-white cursor-pointer"
+                    aria-label="ปิดข้อความแจ้งเตือน"
+                  >
+                    <X className="w-3.5 h-3.5" />
+                  </button>
+                </div>
+              )}
+
+              {/* Live Room Search Result Card */}
+              {roomSearchResult && roomSearchResult.exists && (
+                <div className="p-3 rounded-xl bg-[#0F172A] border border-emerald-500/40 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                  <div className="space-y-1">
+                    <div className="flex flex-wrap items-center gap-2 text-xs">
+                      <span className="font-mono font-extrabold text-amber-300">
+                        พบห้อง #{roomSearchResult.roomId}
+                      </span>
+                      <span
+                        className={`px-2 py-0.5 rounded text-[11px] font-bold ${
+                          roomSearchResult.isFull
+                            ? 'bg-red-500/20 text-red-300 border border-red-500/40'
+                            : roomSearchResult.gameStarted
+                            ? 'bg-amber-500/20 text-amber-300 border border-amber-500/40'
+                            : 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/40'
+                        }`}
+                      >
+                        {roomSearchResult.isFull
+                          ? 'ห้องเต็มแล้ว'
+                          : roomSearchResult.gameStarted
+                          ? 'กำลังเล่นอยู่'
+                          : 'เปิดรับเพื่อนอยู่'}
+                      </span>
+                      <span className="text-slate-300 font-mono">
+                        ผู้เล่นคนจริง {roomSearchResult.humanCount}/{roomSearchResult.maxHumans} คน
+                        {typeof roomSearchResult.onlineCount === 'number'
+                          ? ` (ออนไลน์ ${roomSearchResult.onlineCount})`
+                          : ''}
+                      </span>
+                    </div>
+                    {roomSearchResult.participants.length > 0 && (
+                      <p className="text-[11px] text-slate-400">
+                        ในห้องตอนนี้:{' '}
+                        <span className="text-slate-200 font-medium">
+                          {roomSearchResult.participants.map((p) => p.name).join(', ')}
+                        </span>
+                      </p>
+                    )}
+                  </div>
+                  <div className="flex items-center gap-2 shrink-0">
+                    <button
+                      type="button"
+                      onClick={() => setRoomSearchResult(null)}
+                      className="px-3 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-xs font-semibold text-slate-300 cursor-pointer"
+                    >
+                      ยกเลิก
+                    </button>
+                    <button
+                      type="button"
+                      disabled={roomSearchResult.isFull}
+                      onClick={handleConfirmJoinSearchedRoom}
+                      className="px-4 py-2 rounded-xl bg-emerald-500 hover:bg-emerald-400 disabled:opacity-40 text-slate-950 font-extrabold text-xs flex items-center gap-1.5 cursor-pointer transition-colors"
+                    >
+                      <LogIn className="w-3.5 h-3.5" />
+                      <span>เข้าร่วมห้อง #{roomSearchResult.roomId}</span>
+                    </button>
+                  </div>
+                </div>
+              )}
             </div>
 
             {/* 2-Column Lobby Configuration */}

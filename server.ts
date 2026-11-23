@@ -1131,9 +1131,12 @@ async function startServer() {
     });
   });
 
-  // Room preview endpoint so friends opening an invite link see room status before entering nickname
+  // Room preview & search endpoint so friends can search by room code or open an invite link
   app.get("/api/rooms/:roomId", (req, res) => {
-    const roomId = (req.params.roomId || "").trim().toUpperCase();
+    const roomId = (req.params.roomId || "")
+      .trim()
+      .replace(/^#+/, "")
+      .toUpperCase();
     const room = rooms.get(roomId);
     if (!room) {
       return res.json({
@@ -1141,18 +1144,35 @@ async function startServer() {
         roomId,
         totalPlayers: 10,
         humanCount: 0,
+        onlineCount: 0,
         maxHumans: MAX_HUMAN_PLAYERS,
         participants: [],
         gameStarted: false,
         isFull: false,
       });
     }
+    syncOnlineStatus(room);
+    if (!room.gameStarted && room.participants.length === 0) {
+      return res.json({
+        exists: false,
+        roomId,
+        totalPlayers: 10,
+        humanCount: 0,
+        onlineCount: 0,
+        maxHumans: MAX_HUMAN_PLAYERS,
+        participants: [],
+        gameStarted: false,
+        isFull: false,
+      });
+    }
+    const onlineCount = room.participants.filter((p) => p.isOnline).length;
     return res.json({
       exists: true,
       roomId: room.roomId,
       hostId: room.hostId,
       totalPlayers: room.totalPlayers,
       humanCount: room.participants.length,
+      onlineCount,
       maxHumans: MAX_HUMAN_PLAYERS,
       participants: room.participants.map((p) => ({
         id: p.id,
@@ -1658,6 +1678,35 @@ async function startServer() {
           });
 
           checkAndAdvanceUnanimousPhase(room, expectedTarget);
+        } else if (type === "LEAVE_ROOM") {
+          const meta = clientMeta.get(ws);
+          const leavingId = meta?.playerId || playerId;
+          if (meta && meta.roomId === normalizedRoomId) {
+            clientMeta.delete(ws);
+          }
+          if (leavingId && !room.gameStarted) {
+            room.participants = room.participants.filter((p) => p.id !== leavingId);
+            syncOnlineStatus(room);
+            if (room.hostId === leavingId) {
+              const nextOnline = room.participants.find((p) => p.isOnline);
+              room.hostId = nextOnline?.id || room.participants[0]?.id || null;
+            }
+            if (room.participants.length === 0) {
+              clearRoomPhaseTimer(room);
+              rooms.delete(normalizedRoomId);
+            } else {
+              broadcastToRoom(
+                normalizedRoomId,
+                {
+                  type: "LOBBY_UPDATED",
+                  hostId: room.hostId,
+                  totalPlayers: room.totalPlayers,
+                  participants: room.participants,
+                },
+                ws
+              );
+            }
+          }
         } else if (type === "RETURN_TO_LOBBY") {
           clearRoomPhaseTimer(room);
           cancelRoomBotLoop(room);
