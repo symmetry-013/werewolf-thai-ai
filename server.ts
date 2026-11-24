@@ -892,7 +892,7 @@ function scheduleDayVotingAutoResolve(room: RoomState) {
       senderId: "moderator",
       senderName: "ผู้คุมเกม (GM)",
       gmType: "PHASE",
-      text: "⏰ หมดเวลาโหวต 60 วินาทีแล้ว! ระบบนับผู้ที่ยังไม่กดโหวตเป็น "งดออกเสียง (Abstain)" และสรุปผลทันที",
+      text: '⏰ หมดเวลาโหวต 60 วินาทีแล้ว! ระบบนับผู้ที่ยังไม่กดโหวตเป็น "งดออกเสียง (Abstain)" และสรุปผลทันที',
       phaseLabel: `วันที่ ${room.gameSnapshot?.dayCount || 1} · หมดเวลาโหวต`,
       timestamp: formatServerClock(),
     };
