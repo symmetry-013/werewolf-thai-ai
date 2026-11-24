@@ -50,7 +50,7 @@ function getGeminiConfig() {
   if (!isValidKey(apiKey)) return null;
   return {
     apiKey: apiKey.trim(),
-    primaryModel: (process.env.GEMINI_MODEL_PRIMARY || "gemini-4-hydrogen").trim(),
+    primaryModel: (process.env.GEMINI_MODEL_PRIMARY || "gemini-3.1-flash-lite").trim(),
     fastModel: (process.env.GEMINI_MODEL_FAST || "gemini-3.1-flash-lite").trim(),
   };
 }
@@ -191,13 +191,13 @@ async function discoverGeminiActiveModels(apiKey: string): Promise<string[]> {
 
     const scoreModel = (name: string): number => {
       const n = name.toLowerCase();
-      if (n === "gemini-4-hydrogen") return 100;
-      if (n === "gemini-3.1-flash-lite") return 96;
-      if (n.includes("flash-lite")) return 90;
-      if (n.includes("flash") && !n.includes("thinking")) return 85;
-      if (n.startsWith("gemini-4-")) return 80;
-      if (n.startsWith("gemini-3")) return 75;
-      if (n.startsWith("gemini-2.5")) return 70;
+      if (n === "gemini-3.1-flash-lite") return 100;
+      if (n.includes("flash-lite")) return 96;
+      if (n.includes("flash") && !n.includes("thinking")) return 90;
+      if (n.startsWith("gemini-2.5")) return 85;
+      if (n.startsWith("gemini-3")) return 80;
+      if (n === "gemini-4-hydrogen") return 55; // Free tier limited to 20 RPD — keep as last resort
+      if (n.startsWith("gemini-4-")) return 50;
       return 40;
     };
 
@@ -238,8 +238,8 @@ async function callGeminiProvider(params: {
   const preferPrimary =
     process.env.AI_PREFER_PRIMARY === "true" || params.tier === "primary";
   const baseModels = preferPrimary
-    ? [cfg.primaryModel, cfg.fastModel, "gemini-4-hydrogen", "gemini-3.1-flash-lite"]
-    : [cfg.fastModel, cfg.primaryModel, "gemini-3.1-flash-lite", "gemini-4-hydrogen"];
+    ? [cfg.primaryModel, cfg.fastModel, "gemini-3.1-flash-lite", "gemini-2.5-flash-lite"]
+    : [cfg.fastModel, cfg.primaryModel, "gemini-3.1-flash-lite", "gemini-2.5-flash-lite"];
 
   const now = Date.now();
   const baseUnique = Array.from(new Set(baseModels.filter(Boolean)));
@@ -329,6 +329,13 @@ async function callGeminiProvider(params: {
           sawNotFound = true;
           geminiModelCooldownUntil.set(modelName, Date.now() + 15 * 60 * 1000);
         } else if (
+          lowerErr.includes("perday") ||
+          lowerErr.includes("per day") ||
+          lowerErr.includes("generaterequestsperday")
+        ) {
+          // Daily Free-Tier quota exhausted: cool down for 6 hours so we never keep hammering it
+          geminiModelCooldownUntil.set(modelName, Date.now() + 6 * 60 * 60 * 1000);
+        } else if (
           lowerErr.includes("503") ||
           lowerErr.includes("unavailable") ||
           lowerErr.includes("high demand") ||
@@ -408,17 +415,17 @@ async function discoverGroqChatModels(apiKey: string): Promise<string[]> {
         );
       });
 
-    // Prioritize fast, high-quality Thai-capable chat models on Groq
+    // Prioritize fast, high-quota Thai-capable chat models on Groq
     const scoreGroqModel = (id: string): number => {
       const low = id.toLowerCase();
-      if (low.includes("llama-3.3-70b")) return 100;
-      if (low.includes("llama-4-maverick")) return 96;
+      if (low.includes("gpt-oss-20b")) return 100;
+      if (low.includes("llama-3.3-70b")) return 98;
+      if (low.includes("gpt-oss-120b")) return 95;
       if (low.includes("llama-4-scout")) return 94;
-      if (low.includes("gpt-oss-120b")) return 92;
-      if (low.includes("qwen3-32b") || low.includes("qwen-qwq")) return 90;
+      if (low.includes("llama-4-maverick")) return 93;
+      if (low.includes("qwen3.8") || low.includes("qwen3-32b") || low.includes("qwen-qwq")) return 91;
       if (low.includes("kimi-k2")) return 88;
       if (low.includes("llama-3.1-8b-instant")) return 86;
-      if (low.includes("gpt-oss-20b")) return 84;
       if (low.includes("llama")) return 75;
       if (low.includes("qwen") || low.includes("gemma") || low.includes("mistral")) return 70;
       if (low.includes("compound")) return 35;
@@ -441,12 +448,12 @@ async function discoverGroqChatModels(apiKey: string): Promise<string[]> {
 }
 
 const GROQ_FALLBACK_MODELS = [
+  "openai/gpt-oss-20b",
+  "openai/gpt-oss-120b",
+  "qwen/qwen3.8-27b",
   "llama-3.3-70b-versatile",
   "meta-llama/llama-4-scout-17b-16e-instruct",
   "llama-3.1-8b-instant",
-  "openai/gpt-oss-120b",
-  "openai/gpt-oss-20b",
-  "qwen/qwen3-32b",
 ];
 
 async function callOpenAICompatibleProvider(params: {
@@ -474,7 +481,7 @@ async function callOpenAICompatibleProvider(params: {
   } else if (params.provider === "groq") {
     endpoint = "https://api.groq.com/openai/v1/chat/completions";
     apiKey = (process.env.GROQ_API_KEY || "").trim();
-    const envGroqModel = (process.env.GROQ_MODEL || "llama-3.3-70b-versatile").trim();
+    const envGroqModel = (process.env.GROQ_MODEL || "openai/gpt-oss-20b").trim();
     const discovered = await discoverGroqChatModels(apiKey);
     if (discovered.length > 0) {
       candidateModels =
@@ -2664,7 +2671,7 @@ async function startServer() {
     // --- Step 1: Try GROQ_MODEL first (strict 8,000ms timeout & max_tokens: 100) ---
     const groqApiKey = (process.env.GROQ_API_KEY || "").trim();
     if (isValidKey(groqApiKey)) {
-      const envGroqModel = (process.env.GROQ_MODEL || "llama-3.3-70b-versatile").trim();
+      const envGroqModel = (process.env.GROQ_MODEL || "openai/gpt-oss-20b").trim();
       const discovered = await discoverGroqChatModels(groqApiKey);
       let groqCandidates: string[] = [];
       if (discovered.length > 0) {
@@ -2765,10 +2772,10 @@ async function startServer() {
         const baseList = Array.from(
           new Set(
             [
-              geminiCfg.primaryModel,
               geminiCfg.fastModel,
-              "gemini-4-hydrogen",
+              geminiCfg.primaryModel,
               "gemini-3.1-flash-lite",
+              "gemini-2.5-flash-lite",
             ].filter(Boolean)
           )
         );
@@ -2815,6 +2822,12 @@ async function startServer() {
             const gMsg = String(gErr?.message || gErr).toLowerCase();
             if (gMsg.includes("404") || gMsg.includes("not found")) {
               geminiModelCooldownUntil.set(modelName, Date.now() + 15 * 60 * 1000);
+            } else if (
+              gMsg.includes("perday") ||
+              gMsg.includes("per day") ||
+              gMsg.includes("generaterequestsperday")
+            ) {
+              geminiModelCooldownUntil.set(modelName, Date.now() + 6 * 60 * 60 * 1000);
             } else if (
               gMsg.includes("503") ||
               gMsg.includes("unavailable") ||
@@ -3674,7 +3687,7 @@ ${(recentTranscript || []).slice(-12).join("\n") || "(คืนแรก ยั�
   httpServer.listen(PORT, "0.0.0.0", () => {
     const activeProviders = getConfiguredProviders();
     const geminiCfg = getGeminiConfig();
-    const groqModel = (process.env.GROQ_MODEL || "llama-3.3-70b-versatile").trim();
+    const groqModel = (process.env.GROQ_MODEL || "openai/gpt-oss-20b").trim();
     const hasGroq = isValidKey(process.env.GROQ_API_KEY);
     console.log(`Ultimate Werewolf Server running on port ${PORT}`);
     console.log(
