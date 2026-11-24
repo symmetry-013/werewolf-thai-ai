@@ -750,15 +750,32 @@ const SOURCE_FILES = [
 
 interface RoomParticipant {
   id: string;
+  playerToken: string;
   name: string;
   isOnline: boolean;
+  isDisconnected?: boolean;
+  isTempAI?: boolean;
 }
 
-const DAY_RESULT_AUTO_NIGHT_MS = 5 * 60 * 1000; // 5 minutes discussion timer before auto-entering Night
+const PHASE_COUNTDOWN_MS = 60 * 1000; // 60 seconds (1 minute) countdown for Voting & Ready-to-Night
+const DAY_VOTING_AUTO_RESOLVE_MS = PHASE_COUNTDOWN_MS;
+const DAY_RESULT_AUTO_NIGHT_MS = PHASE_COUNTDOWN_MS;
+
+function isAIControlledPlayer(p: any): boolean {
+  return Boolean(p && (!p.isHuman || p.isTempAI));
+}
+
+function formatServerClock(): string {
+  const now = new Date();
+  const hh = String(now.getHours()).padStart(2, "0");
+  const mm = String(now.getMinutes()).padStart(2, "0");
+  return `${hh}:${mm}`;
+}
 
 interface RoomState {
   roomId: string;
   hostId: string | null;
+  hostToken: string | null;
   totalPlayers: number;
   participants: RoomParticipant[];
   gameStarted: boolean;
@@ -775,7 +792,10 @@ interface RoomState {
 
 const MAX_HUMAN_PLAYERS = 10;
 const rooms = new Map<string, RoomState>();
-const clientMeta = new Map<WebSocket, { roomId: string; playerId: string; isAlive: boolean }>();
+const clientMeta = new Map<
+  WebSocket,
+  { roomId: string; playerId: string; playerToken: string; isAlive: boolean }
+>();
 
 function getOrCreateRoom(roomId: string): RoomState {
   let room = rooms.get(roomId);
@@ -783,6 +803,7 @@ function getOrCreateRoom(roomId: string): RoomState {
     room = {
       roomId,
       hostId: null,
+      hostToken: null,
       totalPlayers: 10,
       participants: [],
       gameStarted: false,
@@ -824,12 +845,85 @@ function cancelRoomBotLoop(room: RoomState) {
   });
 }
 
+function scheduleDayVotingAutoResolve(room: RoomState) {
+  clearRoomPhaseTimer(room);
+  room.phaseDeadlineAt = Date.now() + DAY_VOTING_AUTO_RESOLVE_MS;
+  broadcastToRoom(room.roomId, {
+    type: "PHASE_DEADLINE_UPDATED",
+    phaseDeadlineAt: room.phaseDeadlineAt,
+    phase: "DAY_VOTING",
+  });
+
+  room.phaseTimer = setTimeout(() => {
+    room.phaseTimer = null;
+    if (!room.gameStarted || room.gameSnapshot?.phase !== "DAY_VOTING") {
+      room.phaseDeadlineAt = null;
+      return;
+    }
+    room.phaseDeadlineAt = null;
+    const snapPlayers: any[] = room.gameSnapshot?.players || [];
+    const onlineHumanIds = getLiveOnlineIds(room.roomId);
+    const votesCopy: Record<string, string> = { ...room.pendingDayVotes };
+
+    // Auto-mark any AFK / unvoted online human player as Abstain
+    for (const p of snapPlayers) {
+      if (
+        p.isHuman &&
+        !p.isTempAI &&
+        p.alive &&
+        p.canVote !== false &&
+        onlineHumanIds.has(p.id) &&
+        !votesCopy[p.id]
+      ) {
+        votesCopy[p.id] = "__ABSTAIN__";
+      }
+    }
+
+    room.pendingDayVotes = {};
+    const timeoutMsg = {
+      id: `gm-vote-timeout-${Date.now()}`,
+      senderId: "moderator",
+      senderName: "ผู้คุมเกม (GM)",
+      gmType: "PHASE",
+      text: "⏰ หมดเวลาโหวต 60 วินาทีแล้ว! ระบบนับผู้ที่ยังไม่กดโหวตเป็น "งดออกเสียง (Abstain)" และสรุปผลทันที",
+      phaseLabel: `วันที่ ${room.gameSnapshot?.dayCount || 1} · หมดเวลาโหวต`,
+      timestamp: formatServerClock(),
+    };
+    if (Array.isArray(room.gameSnapshot?.messages)) {
+      room.gameSnapshot.messages = [...room.gameSnapshot.messages, timeoutMsg];
+    }
+    broadcastToRoom(room.roomId, {
+      type: "HUMAN_CHAT_RECEIVED",
+      chatMessage: timeoutMsg,
+    });
+    broadcastToRoom(room.roomId, {
+      type: "VOTE_READY_UPDATED",
+      voteReadyIds: [],
+    });
+    broadcastToRoom(room.roomId, {
+      type: "PHASE_DEADLINE_UPDATED",
+      phaseDeadlineAt: null,
+      phase: "DAY_VOTING",
+    });
+
+    const resolverId = findActiveHostOrFirstOnline(room);
+    if (resolverId) {
+      sendToPlayerInRoom(room.roomId, resolverId, {
+        type: "EXECUTE_VOTE_RESOLVE",
+        humanVotes: votesCopy,
+        timedOut: true,
+      });
+    }
+  }, DAY_VOTING_AUTO_RESOLVE_MS);
+}
+
 function scheduleDayResultAutoNight(room: RoomState) {
   clearRoomPhaseTimer(room);
   room.phaseDeadlineAt = Date.now() + DAY_RESULT_AUTO_NIGHT_MS;
   broadcastToRoom(room.roomId, {
     type: "PHASE_DEADLINE_UPDATED",
     phaseDeadlineAt: room.phaseDeadlineAt,
+    phase: "DAY_RESULT",
   });
 
   room.phaseTimer = setTimeout(() => {
@@ -848,6 +942,7 @@ function scheduleDayResultAutoNight(room: RoomState) {
     broadcastToRoom(room.roomId, {
       type: "PHASE_DEADLINE_UPDATED",
       phaseDeadlineAt: null,
+      phase: "DAY_RESULT",
     });
     const resolverId = findActiveHostOrFirstOnline(room);
     if (resolverId) {
@@ -885,9 +980,9 @@ function checkAndAdvanceUnanimousPhase(room: RoomState, targetPhase: "DAY_VOTING
   if (snapPlayers.length === 0) return;
 
   const onlineHumanIds = getLiveOnlineIds(room.roomId);
-  // Every living AI + every living online human player MUST confirm ready!
+  // Every living AI (including tempAI takeovers) + every living online human player MUST confirm ready!
   const requiredLivingIds = snapPlayers
-    .filter((p) => p.alive && (!p.isHuman || onlineHumanIds.has(p.id)))
+    .filter((p) => p.alive && (isAIControlledPlayer(p) || onlineHumanIds.has(p.id)))
     .map((p) => p.id);
 
   if (
@@ -1035,9 +1130,32 @@ function mergeAuthoritativeSnapshot(
   const mergedMessages =
     missingSecrets.length > 0 ? [...missingSecrets, ...incomingMsgs] : incomingMsgs;
 
+  const prevStatusById = new Map<string, { isDisconnected?: boolean; isTempAI?: boolean }>();
+  if (Array.isArray(prevSnapshot.players)) {
+    for (const p of prevSnapshot.players) {
+      prevStatusById.set(p.id, {
+        isDisconnected: Boolean(p.isDisconnected),
+        isTempAI: Boolean(p.isTempAI),
+      });
+    }
+  }
+
   if (senderIsHost) {
+    const syncedPlayers = Array.isArray(incomingSnapshot.players)
+      ? incomingSnapshot.players.map((p: any) => {
+          const prevFlag = prevStatusById.get(p.id);
+          return prevFlag
+            ? {
+                ...p,
+                isDisconnected: prevFlag.isDisconnected,
+                isTempAI: prevFlag.isTempAI,
+              }
+            : p;
+        })
+      : prevSnapshot.players;
     return {
       ...incomingSnapshot,
+      players: syncedPlayers,
       messages: mergedMessages,
     };
   }
@@ -1187,14 +1305,18 @@ async function startServer() {
       exists: true,
       roomId: room.roomId,
       hostId: room.hostId,
+      hostToken: room.hostToken,
       totalPlayers: room.totalPlayers,
       humanCount: room.participants.length,
       onlineCount,
       maxHumans: MAX_HUMAN_PLAYERS,
       participants: room.participants.map((p) => ({
         id: p.id,
+        playerToken: p.playerToken,
         name: p.name,
         isOnline: p.isOnline,
+        isDisconnected: Boolean(p.isDisconnected),
+        isTempAI: Boolean(p.isTempAI),
       })),
       gameStarted: room.gameStarted,
       isFull: room.participants.length >= MAX_HUMAN_PLAYERS,
@@ -1237,6 +1359,8 @@ async function startServer() {
           type,
           roomId,
           playerId,
+          playerToken,
+          hostToken,
           playerName,
           totalPlayers,
           participants,
@@ -1255,7 +1379,10 @@ async function startServer() {
         const room = getOrCreateRoom(normalizedRoomId);
 
         if (type === "JOIN_ROOM") {
-          const existing = room.participants.find((p) => p.id === playerId);
+          const incomingToken = String(playerToken || playerId || "").trim();
+          const existing = room.participants.find(
+            (p) => (incomingToken && p.playerToken === incomingToken) || p.id === playerId
+          );
 
           if (!existing && room.participants.length >= MAX_HUMAN_PLAYERS) {
             ws.send(
@@ -1268,30 +1395,78 @@ async function startServer() {
             return;
           }
 
+          const effectivePlayerId = existing ? existing.id : String(playerId || incomingToken);
+          const effectiveToken = existing?.playerToken || incomingToken || effectivePlayerId;
+
           clientMeta.set(ws, {
             roomId: normalizedRoomId,
-            playerId,
+            playerId: effectivePlayerId,
+            playerToken: effectiveToken,
             isAlive: true,
           });
 
-          if (!room.hostId) {
-            room.hostId = playerId;
+          if (!room.hostId || !room.hostToken) {
+            room.hostId = effectivePlayerId;
+            room.hostToken = effectiveToken;
           }
 
           const cleanName =
             typeof playerName === "string" && playerName.trim()
               ? playerName.trim().slice(0, 24)
-              : `ผู้เล่น ${room.participants.length + 1}`;
+              : existing?.name || `ผู้เล่น ${room.participants.length + 1}`;
+
+          const snapPlayerBefore = Array.isArray(room.gameSnapshot?.players)
+            ? room.gameSnapshot.players.find((p: any) => p.id === effectivePlayerId)
+            : null;
+          const wasTempAIRejoin = Boolean(
+            room.gameStarted &&
+              room.gameSnapshot &&
+              (existing?.isDisconnected ||
+                existing?.isTempAI ||
+                snapPlayerBefore?.isDisconnected ||
+                snapPlayerBefore?.isTempAI)
+          );
 
           if (existing) {
-            existing.name = cleanName;
+            if (!room.gameStarted) {
+              existing.name = cleanName;
+            }
+            existing.playerToken = effectiveToken;
             existing.isOnline = true;
+            existing.isDisconnected = false;
+            existing.isTempAI = false;
           } else {
             room.participants.push({
-              id: playerId,
+              id: effectivePlayerId,
+              playerToken: effectiveToken,
               name: cleanName,
               isOnline: true,
+              isDisconnected: false,
+              isTempAI: false,
             });
+          }
+
+          // Reclaim control from Temporary AI if player reconnected mid-game
+          let rejoinChatMsg: any = null;
+          if (wasTempAIRejoin && room.gameSnapshot && Array.isArray(room.gameSnapshot.players)) {
+            room.gameSnapshot.players = room.gameSnapshot.players.map((p: any) =>
+              p.id === effectivePlayerId
+                ? { ...p, isDisconnected: false, isTempAI: false }
+                : p
+            );
+            const displayPlayerName = snapPlayerBefore?.name || existing?.name || cleanName;
+            rejoinChatMsg = {
+              id: `sys-rejoin-${effectivePlayerId}-${Date.now()}`,
+              senderId: "moderator",
+              senderName: "ผู้คุมเกม (GM)",
+              gmType: "EVENT",
+              text: `✅ ${displayPlayerName} กลับเข้าสู่เกมแล้ว! (รับช่วงต่อจาก AI เรียบร้อย)`,
+              phaseLabel: "กลับเข้าสู่เกม",
+              timestamp: formatServerClock(),
+            };
+            if (Array.isArray(room.gameSnapshot.messages)) {
+              room.gameSnapshot.messages = [...room.gameSnapshot.messages, rejoinChatMsg];
+            }
           }
 
           // Auto-expand totalPlayers if real humans exceed current target count (up to 10),
@@ -1305,19 +1480,23 @@ async function startServer() {
 
           syncOnlineStatus(room);
 
-          const recipientIsWolf = isPlayerWolfInRoom(room, playerId);
+          const recipientIsWolf = isPlayerWolfInRoom(room, effectivePlayerId);
           ws.send(
             JSON.stringify({
               type: "ROOM_SYNC",
               roomId: room.roomId,
               hostId: room.hostId,
+              hostToken: room.hostToken,
+              playerId: effectivePlayerId,
+              playerToken: effectiveToken,
+              rejoinedInGame: wasTempAIRejoin,
               totalPlayers: room.totalPlayers,
               participants: room.participants,
               gameStarted: room.gameStarted,
               snapshot: sanitizeSnapshotForRecipient(
                 room.gameSnapshot,
-                playerId,
-                room.hostId === playerId
+                effectivePlayerId,
+                room.hostId === effectivePlayerId
               ),
               nightReadyIds: Object.keys(room.pendingNightActions),
               voteReadyIds: Object.keys(room.pendingDayVotes),
@@ -1333,21 +1512,63 @@ async function startServer() {
             {
               type: "LOBBY_UPDATED",
               hostId: room.hostId,
+              hostToken: room.hostToken,
               totalPlayers: room.totalPlayers,
               participants: room.participants,
             },
             ws
           );
+
+          if (wasTempAIRejoin && room.gameSnapshot) {
+            if (rejoinChatMsg) {
+              broadcastToRoom(
+                normalizedRoomId,
+                {
+                  type: "HUMAN_CHAT_RECEIVED",
+                  chatMessage: rejoinChatMsg,
+                },
+                ws
+              );
+            }
+            broadcastPersonalizedToRoom(
+              room,
+              (recipientId, recipientIsHost) => {
+                const isRecipientWolf = isPlayerWolfInRoom(room, recipientId);
+                return {
+                  type: "GAME_STATE_UPDATED",
+                  hostId: room.hostId,
+                  hostToken: room.hostToken,
+                  snapshot: sanitizeSnapshotForRecipient(
+                    room.gameSnapshot,
+                    recipientId,
+                    recipientIsHost
+                  ),
+                  nightReadyIds: Object.keys(room.pendingNightActions),
+                  voteReadyIds: Object.keys(room.pendingDayVotes),
+                  phaseReadyIds: room.phaseReadyIds,
+                  phaseDeadlineAt: room.phaseDeadlineAt,
+                  wolfMessages: isRecipientWolf ? room.wolfMessages : [],
+                  wolfSignals: isRecipientWolf ? room.wolfSignals : {},
+                };
+              },
+              ws
+            );
+          }
         } else if (type === "UPDATE_LOBBY") {
           if (Array.isArray(participants)) {
             const liveIds = getLiveOnlineIds(normalizedRoomId);
             const incomingById = new Map<string, RoomParticipant>();
+            const prevById = new Map(room.participants.map((ep) => [ep.id, ep]));
             for (const p of participants.slice(0, MAX_HUMAN_PLAYERS)) {
               if (p && p.id) {
+                const prev = prevById.get(p.id);
                 incomingById.set(p.id, {
                   id: p.id,
+                  playerToken: prev?.playerToken || p.playerToken || p.id,
                   name: typeof p.name === "string" ? p.name.slice(0, 24) : "ผู้เล่น",
                   isOnline: liveIds.has(p.id),
+                  isDisconnected: prev?.isDisconnected || false,
+                  isTempAI: prev?.isTempAI || false,
                 });
               }
             }
@@ -1383,6 +1604,7 @@ async function startServer() {
           broadcastToRoom(normalizedRoomId, {
             type: "LOBBY_UPDATED",
             hostId: room.hostId,
+            hostToken: room.hostToken,
             totalPlayers: room.totalPlayers,
             participants: room.participants,
           });
@@ -1397,15 +1619,43 @@ async function startServer() {
             {
               type: "LOBBY_UPDATED",
               hostId: room.hostId,
+              hostToken: room.hostToken,
               totalPlayers: room.totalPlayers,
               participants: room.participants,
             },
             ws
           );
         } else if (type === "START_GAME") {
+          // Strict Host-Only Start Game verification via hostToken
+          const senderMeta = clientMeta.get(ws);
+          const providedToken = String(
+            hostToken || playerToken || senderMeta?.playerToken || playerId || ""
+          ).trim();
+          const isAuthorizedHost =
+            !room.hostToken ||
+            providedToken === room.hostToken ||
+            (Boolean(senderMeta?.playerId) && senderMeta?.playerId === room.hostId);
+
+          if (!isAuthorizedHost) {
+            ws.send(
+              JSON.stringify({
+                type: "START_GAME_DENIED",
+                hostId: room.hostId,
+                hostToken: room.hostToken,
+                message: "เฉพาะหัวหน้าห้องเท่านั้นที่สามารถกดเริ่มเกมได้",
+              })
+            );
+            return;
+          }
+
           clearRoomPhaseTimer(room);
           cancelRoomBotLoop(room);
           room.gameStarted = true;
+          room.participants = room.participants.map((p) => ({
+            ...p,
+            isDisconnected: false,
+            isTempAI: false,
+          }));
           room.gameSnapshot = snapshot;
           room.pendingNightActions = {};
           room.pendingDayVotes = {};
@@ -1419,6 +1669,7 @@ async function startServer() {
             (recipientId, recipientIsHost) => ({
               type: "GAME_STARTED",
               hostId: room.hostId,
+              hostToken: room.hostToken,
               participants: room.participants,
               snapshot: sanitizeSnapshotForRecipient(
                 room.gameSnapshot,
@@ -1455,10 +1706,16 @@ async function startServer() {
             if (nextPhase !== "DAY_DISCUSSION" && nextPhase !== "DAY_RESULT") {
               cancelRoomBotLoop(room);
             }
-            if (nextPhase === "DAY_RESULT") {
+            if (nextPhase === "DAY_VOTING") {
+              scheduleDayVotingAutoResolve(room);
+            } else if (nextPhase === "DAY_RESULT") {
               scheduleDayResultAutoNight(room);
             } else {
               clearRoomPhaseTimer(room);
+              broadcastToRoom(normalizedRoomId, {
+                type: "PHASE_DEADLINE_UPDATED",
+                phaseDeadlineAt: null,
+              });
             }
           }
 
@@ -1562,9 +1819,9 @@ async function startServer() {
           const snapPlayers: any[] = room.gameSnapshot?.players || [];
           const onlineHumanIds = getLiveOnlineIds(normalizedRoomId);
 
-          // Enforce 2-wolf consensus when BOTH living wolves are online real humans!
+          // Enforce 2-wolf consensus when BOTH living wolves are online active real humans!
           const onlineLivingHumanWolves = snapPlayers.filter(
-            (p) => p.isHuman && p.alive && isWolfRole(p.role) && onlineHumanIds.has(p.id)
+            (p) => p.isHuman && !p.isTempAI && p.alive && isWolfRole(p.role) && onlineHumanIds.has(p.id)
           );
           if (onlineLivingHumanWolves.length === 2) {
             const [w1, w2] = onlineLivingHumanWolves;
@@ -1594,7 +1851,7 @@ async function startServer() {
           });
 
           const requiredHumanPlayers = snapPlayers.filter(
-            (p) => p.isHuman && p.alive && onlineHumanIds.has(p.id)
+            (p) => p.isHuman && !p.isTempAI && p.alive && onlineHumanIds.has(p.id)
           );
           const allSubmitted =
             requiredHumanPlayers.length === 0 ||
@@ -1639,13 +1896,18 @@ async function startServer() {
           const snapPlayers: any[] = room.gameSnapshot?.players || [];
           const onlineHumanIds = getLiveOnlineIds(normalizedRoomId);
           const requiredVoters = snapPlayers.filter(
-            (p) => p.isHuman && p.alive && p.canVote && onlineHumanIds.has(p.id)
+            (p) => p.isHuman && !p.isTempAI && p.alive && p.canVote && onlineHumanIds.has(p.id)
           );
           const allVoted =
             requiredVoters.length === 0 ||
             requiredVoters.every((p) => Boolean(room.pendingDayVotes[p.id]));
 
           if (allVoted) {
+            clearRoomPhaseTimer(room);
+            broadcastToRoom(normalizedRoomId, {
+              type: "PHASE_DEADLINE_UPDATED",
+              phaseDeadlineAt: null,
+            });
             const resolverId = findActiveHostOrFirstOnline(room) || playerId;
             const votesCopy: Record<string, string> = { ...room.pendingDayVotes };
             room.pendingDayVotes = {};
@@ -1655,6 +1917,11 @@ async function startServer() {
             });
           }
         } else if (type === "FORCE_RESOLVE_VOTE") {
+          clearRoomPhaseTimer(room);
+          broadcastToRoom(normalizedRoomId, {
+            type: "PHASE_DEADLINE_UPDATED",
+            phaseDeadlineAt: null,
+          });
           const votesCopy: Record<string, string> = { ...room.pendingDayVotes };
           if (playerId) {
             votesCopy[playerId] = voteTargetId || "__ABSTAIN__";
@@ -1706,7 +1973,9 @@ async function startServer() {
             syncOnlineStatus(room);
             if (room.hostId === leavingId) {
               const nextOnline = room.participants.find((p) => p.isOnline);
-              room.hostId = nextOnline?.id || room.participants[0]?.id || null;
+              const nextHost = nextOnline || room.participants[0] || null;
+              room.hostId = nextHost?.id || null;
+              room.hostToken = nextHost?.playerToken || null;
             }
             if (room.participants.length === 0) {
               clearRoomPhaseTimer(room);
@@ -1717,6 +1986,7 @@ async function startServer() {
                 {
                   type: "LOBBY_UPDATED",
                   hostId: room.hostId,
+                  hostToken: room.hostToken,
                   totalPlayers: room.totalPlayers,
                   participants: room.participants,
                 },
@@ -1725,6 +1995,7 @@ async function startServer() {
             }
           }
         } else if (type === "RETURN_TO_LOBBY") {
+          // Persistent Room After Game Over: keep exact roomId & reset all tempAI slots to normal Lobby seats
           clearRoomPhaseTimer(room);
           cancelRoomBotLoop(room);
           room.gameStarted = false;
@@ -1734,17 +2005,29 @@ async function startServer() {
           room.phaseReadyIds = [];
           room.wolfMessages = [];
           room.wolfSignals = {};
+          room.participants = room.participants.map((p) => ({
+            ...p,
+            isDisconnected: false,
+            isTempAI: false,
+          }));
           syncOnlineStatus(room);
-          broadcastToRoom(
-            normalizedRoomId,
-            {
-              type: "RETURNED_TO_LOBBY",
-              hostId: room.hostId,
-              totalPlayers: room.totalPlayers,
-              participants: room.participants,
-            },
-            ws
-          );
+          // Ensure host is an online participant if available
+          const currentHost = room.participants.find((p) => p.id === room.hostId);
+          if (!currentHost || !currentHost.isOnline) {
+            const nextOnline = room.participants.find((p) => p.isOnline);
+            if (nextOnline) {
+              room.hostId = nextOnline.id;
+              room.hostToken = nextOnline.playerToken;
+            }
+          }
+          broadcastToRoom(normalizedRoomId, {
+            type: "RETURNED_TO_LOBBY",
+            roomId: room.roomId,
+            hostId: room.hostId,
+            hostToken: room.hostToken,
+            totalPlayers: room.totalPlayers,
+            participants: room.participants,
+          });
         }
       } catch (err) {
         console.error("WS message error:", err);
@@ -1758,49 +2041,156 @@ async function startServer() {
         const room = rooms.get(meta.roomId);
         if (room) {
           syncOnlineStatus(room);
+          const stillOnline = getLiveOnlineIds(meta.roomId).has(meta.playerId);
+          if (stillOnline) return;
+
           let hostTransferredTo: string | null = null;
-          // If host disconnected, transfer host to next online participant
+          // If host disconnected, transfer hostId & hostToken to next online participant automatically
           if (room.hostId === meta.playerId) {
             const nextOnline = room.participants.find((item) => item.isOnline);
             if (nextOnline) {
               room.hostId = nextOnline.id;
+              room.hostToken = nextOnline.playerToken;
               hostTransferredTo = nextOnline.id;
             }
           }
+
+          // Seamless AI Takeover when a real human disconnects mid-game (PLAYING)
+          const isMidGame = Boolean(
+            room.gameStarted &&
+              room.gameSnapshot &&
+              room.gameSnapshot.shellState !== "GAME_OVER" &&
+              room.gameSnapshot.phase !== "GAME_OVER"
+          );
+
+          let disconnectChatMsg: any = null;
+          if (isMidGame) {
+            const part = room.participants.find((item) => item.id === meta.playerId);
+            if (part) {
+              part.isOnline = false;
+              part.isDisconnected = true;
+              part.isTempAI = true;
+            }
+            if (Array.isArray(room.gameSnapshot.players)) {
+              const targetSnapPlayer = room.gameSnapshot.players.find(
+                (p: any) => p.id === meta.playerId && p.isHuman
+              );
+              if (targetSnapPlayer && !targetSnapPlayer.isTempAI) {
+                targetSnapPlayer.isDisconnected = true;
+                targetSnapPlayer.isTempAI = true;
+                disconnectChatMsg = {
+                  id: `sys-dc-${meta.playerId}-${Date.now()}`,
+                  senderId: "moderator",
+                  senderName: "ผู้คุมเกม (GM)",
+                  gmType: "EVENT",
+                  text: `⚠️ ${targetSnapPlayer.name} เน็ตหลุดชั่วคราว ระบบส่งบอท AI เข้าสวมรอยเล่นแทนให้ก่อน (สามารถกลับเข้าห้องเดิมได้ตลอดเวลา)`,
+                  phaseLabel: "AI สวมรอยชั่วคราว",
+                  timestamp: formatServerClock(),
+                };
+                if (Array.isArray(room.gameSnapshot.messages)) {
+                  room.gameSnapshot.messages = [
+                    ...room.gameSnapshot.messages,
+                    disconnectChatMsg,
+                  ];
+                }
+              }
+            }
+          }
+
           broadcastToRoom(meta.roomId, {
             type: "LOBBY_UPDATED",
             hostId: room.hostId,
+            hostToken: room.hostToken,
             totalPlayers: room.totalPlayers,
             participants: room.participants,
           });
-          // Give the newly promoted host authoritative game state so they can resolve nights/votes
-          if (hostTransferredTo && room.gameStarted && room.gameSnapshot) {
-            const promotedIsWolf = isPlayerWolfInRoom(room, hostTransferredTo);
-            sendToPlayerInRoom(meta.roomId, hostTransferredTo, {
-              type: "GAME_STATE_UPDATED",
-              hostId: room.hostId,
-              snapshot: sanitizeSnapshotForRecipient(
-                room.gameSnapshot,
-                hostTransferredTo,
-                true
-              ),
-              nightReadyIds: Object.keys(room.pendingNightActions),
-              voteReadyIds: Object.keys(room.pendingDayVotes),
-              phaseReadyIds: room.phaseReadyIds,
-              phaseDeadlineAt: room.phaseDeadlineAt,
-              ...(promotedIsWolf
-                ? {
-                    wolfMessages: room.wolfMessages,
-                    wolfSignals: room.wolfSignals,
-                  }
-                : {}),
+
+          if (disconnectChatMsg) {
+            broadcastToRoom(meta.roomId, {
+              type: "HUMAN_CHAT_RECEIVED",
+              chatMessage: disconnectChatMsg,
             });
           }
-          // Re-check unanimous phase readiness in case the disconnected player was the last one blocking
-          if (room.gameStarted && room.gameSnapshot) {
-            if (room.gameSnapshot.phase === "DAY_DISCUSSION") {
+
+          // Broadcast updated snapshot (including isTempAI/isDisconnected flags + promoted host authority)
+          if (room.gameStarted && room.gameSnapshot && (disconnectChatMsg || hostTransferredTo)) {
+            broadcastPersonalizedToRoom(room, (recipientId, recipientIsHost) => {
+              const isRecipientWolf = isPlayerWolfInRoom(room, recipientId);
+              return {
+                type: "GAME_STATE_UPDATED",
+                hostId: room.hostId,
+                hostToken: room.hostToken,
+                snapshot: sanitizeSnapshotForRecipient(
+                  room.gameSnapshot,
+                  recipientId,
+                  recipientIsHost
+                ),
+                nightReadyIds: Object.keys(room.pendingNightActions),
+                voteReadyIds: Object.keys(room.pendingDayVotes),
+                phaseReadyIds: room.phaseReadyIds,
+                phaseDeadlineAt: room.phaseDeadlineAt,
+                wolfMessages: isRecipientWolf ? room.wolfMessages : [],
+                wolfSignals: isRecipientWolf ? room.wolfSignals : {},
+              };
+            });
+          }
+
+          // Re-check phase completion in case the disconnected player was the last human blocking
+          if (isMidGame) {
+            const curPhase = room.gameSnapshot.phase;
+            const snapPlayers: any[] = room.gameSnapshot.players || [];
+            const onlineHumanIds = getLiveOnlineIds(meta.roomId);
+
+            if (curPhase === "NIGHT_ACTION") {
+              const requiredHumans = snapPlayers.filter(
+                (p) => p.isHuman && !p.isTempAI && p.alive && onlineHumanIds.has(p.id)
+              );
+              const allSubmitted =
+                requiredHumans.length === 0 ||
+                requiredHumans.every((p) => Boolean(room.pendingNightActions[p.id]));
+              if (allSubmitted && Object.keys(room.pendingNightActions).length > 0) {
+                const resolverId = findActiveHostOrFirstOnline(room);
+                if (resolverId) {
+                  const actionsCopy = { ...room.pendingNightActions };
+                  room.pendingNightActions = {};
+                  room.wolfSignals = {};
+                  sendToPlayerInRoom(meta.roomId, resolverId, {
+                    type: "EXECUTE_NIGHT_RESOLVE",
+                    humanActions: actionsCopy,
+                  });
+                }
+              }
+            } else if (curPhase === "DAY_VOTING") {
+              const requiredVoters = snapPlayers.filter(
+                (p) =>
+                  p.isHuman &&
+                  !p.isTempAI &&
+                  p.alive &&
+                  p.canVote !== false &&
+                  onlineHumanIds.has(p.id)
+              );
+              const allVoted =
+                requiredVoters.length === 0 ||
+                requiredVoters.every((p) => Boolean(room.pendingDayVotes[p.id]));
+              if (allVoted && Object.keys(room.pendingDayVotes).length > 0) {
+                clearRoomPhaseTimer(room);
+                broadcastToRoom(meta.roomId, {
+                  type: "PHASE_DEADLINE_UPDATED",
+                  phaseDeadlineAt: null,
+                });
+                const resolverId = findActiveHostOrFirstOnline(room);
+                if (resolverId) {
+                  const votesCopy = { ...room.pendingDayVotes };
+                  room.pendingDayVotes = {};
+                  sendToPlayerInRoom(meta.roomId, resolverId, {
+                    type: "EXECUTE_VOTE_RESOLVE",
+                    humanVotes: votesCopy,
+                  });
+                }
+              }
+            } else if (curPhase === "DAY_DISCUSSION") {
               checkAndAdvanceUnanimousPhase(room, "DAY_VOTING");
-            } else if (room.gameSnapshot.phase === "DAY_RESULT") {
+            } else if (curPhase === "DAY_RESULT") {
               checkAndAdvanceUnanimousPhase(room, "NIGHT_ACTION");
             }
           }
@@ -2753,7 +3143,7 @@ async function startServer() {
         ? authSnap.wolfKillHistory
         : reqWolfHistory || [];
 
-      const aliveAI = players.filter((p: any) => p.alive && !p.isHuman);
+      const aliveAI = players.filter((p: any) => p.alive && isAIControlledPlayer(p));
       if (aliveAI.length === 0) {
         return res.json({ ok: true, data: { messages: [] }, aliveAIIds: [] });
       }
@@ -2863,7 +3253,7 @@ async function startServer() {
       const aliveAll = players.filter((p: any) => p.alive);
       const deadAll = players.filter((p: any) => !p.alive);
       const eligibleAI = aliveAll.filter(
-        (p: any) => !p.isHuman && p.canVote !== false
+        (p: any) => isAIControlledPlayer(p) && p.canVote !== false
       );
 
       if (eligibleAI.length === 0) {
@@ -3082,7 +3472,7 @@ ${(recentTranscript || []).slice(-18).join("\n")}
         ? authSnap.wolfKillHistory
         : reqWolfHistory || [];
 
-      const aiWolf = players.find((p: any) => p.id === aiWolfId && p.alive && !p.isHuman);
+      const aiWolf = players.find((p: any) => p.id === aiWolfId && p.alive && isAIControlledPlayer(p));
       const alivePrey = players.filter(
         (p: any) => p.alive && !isWolfRole(p.role)
       );
@@ -3197,9 +3587,10 @@ ${modeInstruction}`;
 
       const alive = players.filter((p: any) => p.alive);
       const aliveWolves = alive.filter((p: any) => isWolfRole(p.role));
-      const needsAIWolf = aliveWolves.length > 0 && aliveWolves.every((w: any) => !w.isHuman);
-      const aiSeer = alive.find((p: any) => p.role === "SEER" && !p.isHuman);
-      const aiBodyguard = alive.find((p: any) => p.role === "BODYGUARD" && !p.isHuman);
+      const needsAIWolf =
+        aliveWolves.length > 0 && aliveWolves.every((w: any) => isAIControlledPlayer(w));
+      const aiSeer = alive.find((p: any) => p.role === "SEER" && isAIControlledPlayer(p));
+      const aiBodyguard = alive.find((p: any) => p.role === "BODYGUARD" && isAIControlledPlayer(p));
 
       if (!needsAIWolf && !aiSeer && !aiBodyguard) {
         return res.json({ ok: true, data: {} });

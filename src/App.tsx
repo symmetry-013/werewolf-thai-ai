@@ -97,10 +97,13 @@ function detectInitialRoomSetup(): { roomId: string; isInvitedLink: boolean } {
   const params = new URLSearchParams(window.location.search);
   const fromUrl = params.get('room')?.trim().toUpperCase();
   if (fromUrl && fromUrl.length >= 3) {
-    // Check if this browser tab already joined or created this exact room
+    // Auto-Rejoin if this browser already has a saved playerToken for this exact roomId
     try {
-      const joinedRoom = window.sessionStorage.getItem('werewolf_joined_room');
-      if (joinedRoom === fromUrl) {
+      const joinedRoomSession = window.sessionStorage.getItem('werewolf_joined_room');
+      const savedRoomLocal = window.localStorage.getItem('werewolf_room_id');
+      const savedTokenLocal = window.localStorage.getItem('werewolf_player_token');
+      if (joinedRoomSession === fromUrl || (savedRoomLocal === fromUrl && Boolean(savedTokenLocal))) {
+        window.sessionStorage.setItem('werewolf_joined_room', fromUrl);
         return { roomId: fromUrl, isInvitedLink: false };
       }
     } catch {
@@ -115,6 +118,7 @@ function detectInitialRoomSetup(): { roomId: string; isInvitedLink: boolean } {
     url.searchParams.set('room', randomCode);
     window.history.replaceState({}, '', url.toString());
     window.sessionStorage.setItem('werewolf_joined_room', randomCode);
+    window.localStorage.setItem('werewolf_room_id', randomCode);
   } catch {
     // Ignore history/storage errors in restricted iframes
   }
@@ -124,14 +128,27 @@ function detectInitialRoomSetup(): { roomId: string; isInvitedLink: boolean } {
 function getOrCreateMyClientId(): string {
   if (typeof window === 'undefined') return 'human-1';
   try {
-    const existing = window.sessionStorage.getItem('werewolf_client_id');
-    if (existing) return existing;
-    const created = 'human-' + Math.random().toString(36).substring(2, 8);
+    const existingLocal = window.localStorage.getItem('werewolf_player_token');
+    if (existingLocal) {
+      window.sessionStorage.setItem('werewolf_client_id', existingLocal);
+      return existingLocal;
+    }
+    const existingSession = window.sessionStorage.getItem('werewolf_client_id');
+    if (existingSession) {
+      window.localStorage.setItem('werewolf_player_token', existingSession);
+      return existingSession;
+    }
+    const created = 'human-' + Math.random().toString(36).substring(2, 10);
+    window.localStorage.setItem('werewolf_player_token', created);
     window.sessionStorage.setItem('werewolf_client_id', created);
     return created;
   } catch {
-    return 'human-' + Math.random().toString(36).substring(2, 8);
+    return 'human-' + Math.random().toString(36).substring(2, 10);
   }
+}
+
+function isPlayerAIControlled(p: Player | null | undefined): boolean {
+  return Boolean(p && (!p.isHuman || (p as any).isTempAI));
 }
 
 function getInitialSavedName(isInvited: boolean): string {
@@ -165,6 +182,9 @@ export default function App() {
   const [roomPreview, setRoomPreview] = useState<RoomPreviewInfo | null>(null);
   const [roomFullError, setRoomFullError] = useState<boolean>(false);
   const [hostId, setHostId] = useState<string | null>(
+    initialRoomRef.current.isInvitedLink ? null : getOrCreateMyClientId()
+  );
+  const [hostToken, setHostToken] = useState<string | null>(
     initialRoomRef.current.isInvitedLink ? null : getOrCreateMyClientId()
   );
 
@@ -239,9 +259,9 @@ export default function App() {
   const [unreadWolfCount, setUnreadWolfCount] = useState<number>(0);
   const [wolfConsensusError, setWolfConsensusError] = useState<string | null>(null);
 
-  // 5-minute countdown timer before auto-entering Night during DAY_RESULT
+  // 60-second countdown timer for Voting Phase (DAY_VOTING) and Ready-to-Night (DAY_RESULT)
   const [phaseDeadlineAt, setPhaseDeadlineAt] = useState<number | null>(null);
-  const [dayResultSecondsLeft, setDayResultSecondsLeft] = useState<number>(300);
+  const [dayResultSecondsLeft, setDayResultSecondsLeft] = useState<number>(60);
 
   const [activeSpeakerId, setActiveSpeakerId] = useState<string | null>(null);
   const [showRoleCardModal, setShowRoleCardModal] = useState<boolean>(false);
@@ -341,6 +361,8 @@ export default function App() {
     if (!trimmed) return;
     try {
       window.localStorage.setItem('werewolf_player_name', trimmed);
+      window.localStorage.setItem('werewolf_room_id', roomId);
+      window.localStorage.setItem('werewolf_player_token', myClientId);
       window.sessionStorage.setItem('werewolf_joined_room', roomId);
     } catch {
       // Ignore storage errors
@@ -392,6 +414,8 @@ export default function App() {
       url.searchParams.set('room', targetCode);
       window.history.replaceState({}, '', url.toString());
       window.sessionStorage.setItem('werewolf_joined_room', targetCode);
+      window.localStorage.setItem('werewolf_room_id', targetCode);
+      window.localStorage.setItem('werewolf_player_token', myClientId);
     } catch {
       // Ignore
     }
@@ -401,6 +425,7 @@ export default function App() {
     setRoomSearchError(null);
     setRoomCodeInput('');
     setHostId(isCreatingOwn ? myClientId : null);
+    setHostToken(isCreatingOwn ? myClientId : null);
     setHumanParticipants([
       {
         id: myClientId,
@@ -520,11 +545,18 @@ export default function App() {
 
         socket.onopen = () => {
           setWsConnected(true);
+          try {
+            window.localStorage.setItem('werewolf_room_id', roomId);
+            window.localStorage.setItem('werewolf_player_token', myClientId);
+          } catch {
+            // Ignore storage errors
+          }
           socket?.send(
             JSON.stringify({
               type: 'JOIN_ROOM',
               roomId,
               playerId: myClientId,
+              playerToken: myClientId,
               playerName: myNameRef.current.trim() || 'ผู้เล่น 1',
             })
           );
@@ -539,8 +571,14 @@ export default function App() {
               setShellState('FRIEND_JOIN');
               return;
             }
+            if (data.type === 'START_GAME_DENIED') {
+              setRoomJoinNotice(data.message || 'เฉพาะหัวหน้าห้องเท่านั้นที่สามารถกดเริ่มเกมได้');
+              setTimeout(() => setRoomJoinNotice(null), 3500);
+              return;
+            }
             if (data.type === 'ROOM_SYNC' || data.type === 'LOBBY_UPDATED') {
-              if (data.hostId) setHostId(data.hostId);
+              if (data.hostId !== undefined) setHostId(data.hostId || null);
+              if (data.hostToken !== undefined) setHostToken(data.hostToken || null);
               if (typeof data.totalPlayers === 'number') {
                 setTotalPlayerCount(data.totalPlayers);
               }
@@ -602,6 +640,8 @@ export default function App() {
                 setShellState(
                   snap.shellState === 'GAME_OVER'
                     ? 'GAME_OVER'
+                    : data.rejoinedInGame
+                    ? 'PLAYING'
                     : amInMatch
                     ? 'ROLE_REVEAL'
                     : 'PLAYING'
@@ -611,6 +651,7 @@ export default function App() {
               const snap = data.snapshot;
               const snapPlayers: Player[] = Array.isArray(snap.players) ? snap.players : [];
               if (data.hostId) setHostId(data.hostId);
+              if (data.hostToken) setHostToken(data.hostToken);
               if (Array.isArray(data.participants) && data.participants.length > 0) {
                 setHumanParticipants(
                   data.participants.map((p: HumanParticipant) =>
@@ -663,6 +704,7 @@ export default function App() {
             } else if (data.type === 'GAME_STATE_UPDATED' && data.snapshot) {
               const snap = data.snapshot;
               if (data.hostId) setHostId(data.hostId);
+              if (data.hostToken) setHostToken(data.hostToken);
               let diedInThisSync = false;
               if (Array.isArray(snap.players)) {
                 const meInSnap = (snap.players as Player[]).find(
@@ -870,7 +912,8 @@ export default function App() {
                 executePhaseAdvanceRef.current?.(data.targetPhase, data.reason);
               }
             } else if (data.type === 'RETURNED_TO_LOBBY') {
-              if (data.hostId) setHostId(data.hostId);
+              if (data.hostId !== undefined) setHostId(data.hostId || null);
+              if (data.hostToken !== undefined) setHostToken(data.hostToken || null);
               if (typeof data.totalPlayers === 'number') {
                 setTotalPlayerCount(data.totalPlayers);
               }
@@ -878,6 +921,11 @@ export default function App() {
                 setHumanParticipants(data.participants);
               }
               setPhaseDeadlineAt(null);
+              setPhaseReadyIds([]);
+              setNightReadyIds([]);
+              setVoteReadyIds([]);
+              setHasSubmittedNight(false);
+              setHasSubmittedVote(false);
               setWolfMessages([]);
               setWolfSignals({});
               setIsServerBotQueueActive(false);
@@ -1067,7 +1115,15 @@ export default function App() {
     [humanParticipants]
   );
   const isMultiDeviceOnline = wsConnected && onlineHumansList.length > 1;
-  const isHost = !hostId || hostId === myClientId;
+  const isHost = Boolean(
+    (hostToken && hostToken === myClientId) || (!hostToken && (!hostId || hostId === myClientId))
+  );
+  const hostDisplayName = useMemo(() => {
+    const found = humanParticipants.find(
+      (hp) => hp.id === hostId || (hostToken && (hp as any).playerToken === hostToken)
+    );
+    return found?.name || 'หัวหน้าห้อง';
+  }, [humanParticipants, hostId, hostToken]);
 
   // STRICT PRIVACY: Each device/browser ONLY EVER sees its own player (by myClientId) — zero fallback to Host/other players!
   const myPlayer = useMemo(
@@ -1131,7 +1187,9 @@ export default function App() {
 
   const onlineAliveHumans = useMemo(() => {
     const onlineIds = new Set(onlineHumansList.map((hp) => hp.id));
-    return players.filter((p) => p.isHuman && p.alive && onlineIds.has(p.id));
+    return players.filter(
+      (p) => p.isHuman && !(p as any).isTempAI && p.alive && onlineIds.has(p.id)
+    );
   }, [players, onlineHumansList]);
 
   const onlineEligibleHumanVoters = useMemo(
@@ -1139,12 +1197,12 @@ export default function App() {
     [onlineAliveHumans]
   );
 
-  // Every living AI + every living online human must press Ready to move to Voting / next Night!
+  // Every living AI (including tempAI) + every living online human must press Ready to move to Voting / next Night!
   const requiredPhaseReadyPlayers = useMemo(() => {
     if (wsConnected && onlineHumansList.length > 0) {
       const onlineIds = new Set(onlineHumansList.map((hp) => hp.id));
       return players.filter(
-        (p) => p.alive && (!p.isHuman || onlineIds.has(p.id))
+        (p) => p.alive && (isPlayerAIControlled(p) || onlineIds.has(p.id))
       );
     }
     return players.filter((p) => p.alive);
@@ -1184,6 +1242,11 @@ export default function App() {
 
   // Start a new game: 100% Pure Random Role Assignment + Random AI reduction -> Show ROLE_REVEAL screen
   const startNewRandomGame = useCallback(() => {
+    if (wsConnected && !isHost) {
+      setRoomJoinNotice(`รอหัวหน้าห้อง (${hostDisplayName}) กดเริ่มเกม...`);
+      setTimeout(() => setRoomJoinNotice(null), 3000);
+      return;
+    }
     const sanitizedParticipants = humanParticipants.slice(0, 10).map((hp, i) => ({
       ...hp,
       name: hp.name.trim() || `ผู้เล่น ${i + 1}`,
@@ -1343,6 +1406,8 @@ export default function App() {
 
     sendWsMessage({
       type: 'START_GAME',
+      playerId: myClientId,
+      hostToken: myClientId,
       snapshot: {
         players: freshPlayers,
         phase: 'NIGHT_ACTION',
@@ -1360,7 +1425,7 @@ export default function App() {
         shellState: 'ROLE_REVEAL',
       },
     });
-  }, [humanParticipants, totalPlayerCount, myClientId, sendWsMessage]);
+  }, [humanParticipants, totalPlayerCount, myClientId, sendWsMessage, wsConnected, isHost, hostDisplayName]);
 
   const broadcastGameState = useCallback(
     (nextState: {
@@ -1701,12 +1766,12 @@ export default function App() {
     return () => window.clearTimeout(timer);
   }, [shellState, phase, dayCount]);
 
-  // 5-minute countdown clock during DAY_RESULT (auto-enters Night at 00:00 if not skipped early by unanimous Ready)
+  // 60-second countdown clock during DAY_VOTING and DAY_RESULT (auto-abstain / auto-advance at 00:00)
   useEffect(() => {
-    if (shellState !== 'PLAYING' || phase !== 'DAY_RESULT') {
+    if (shellState !== 'PLAYING' || (phase !== 'DAY_VOTING' && phase !== 'DAY_RESULT')) {
       return;
     }
-    const effectiveDeadline = phaseDeadlineAt ?? Date.now() + 5 * 60 * 1000;
+    const effectiveDeadline = phaseDeadlineAt ?? Date.now() + 60 * 1000;
     if (!phaseDeadlineAt) {
       setPhaseDeadlineAt(effectiveDeadline);
     }
@@ -1714,17 +1779,27 @@ export default function App() {
     const tick = () => {
       const remaining = Math.max(0, Math.ceil((effectiveDeadline - Date.now()) / 1000));
       setDayResultSecondsLeft(remaining);
-      if (remaining === 0 && !wsConnected) {
-        executePhaseAdvanceRef.current?.('NIGHT_ACTION', 'TIMEOUT');
-      } else if (remaining === 0 && wsConnected && isHost && Date.now() - effectiveDeadline > 2500) {
-        executePhaseAdvanceRef.current?.('NIGHT_ACTION', 'TIMEOUT');
+      if (remaining === 0) {
+        if (phase === 'DAY_VOTING') {
+          if (!wsConnected) {
+            executeVoteResolveRef.current?.({});
+          } else if (isHost && Date.now() - effectiveDeadline > 2500) {
+            sendWsMessage({ type: 'FORCE_RESOLVE_VOTE' });
+          }
+        } else if (phase === 'DAY_RESULT') {
+          if (!wsConnected) {
+            executePhaseAdvanceRef.current?.('NIGHT_ACTION', 'TIMEOUT');
+          } else if (isHost && Date.now() - effectiveDeadline > 2500) {
+            executePhaseAdvanceRef.current?.('NIGHT_ACTION', 'TIMEOUT');
+          }
+        }
       }
     };
 
     tick();
     const interval = window.setInterval(tick, 1000);
     return () => window.clearInterval(interval);
-  }, [shellState, phase, phaseDeadlineAt, wsConnected, isHost]);
+  }, [shellState, phase, phaseDeadlineAt, wsConnected, isHost, sendWsMessage]);
 
   const formatCountdown = (totalSeconds: number) => {
     const mins = Math.floor(totalSeconds / 60);
@@ -1793,7 +1868,7 @@ export default function App() {
       if (shellState === 'FRIEND_JOIN') return;
 
       if (shellState === 'TITLE_SCREEN') {
-        if (!isInputFocused && (e.key === 'Enter' || e.key === ' ')) {
+        if (!isInputFocused && (e.key === 'Enter' || e.key === ' ') && isHost) {
           e.preventDefault();
           startNewRandomGame();
         }
@@ -2377,8 +2452,8 @@ export default function App() {
       const aliveNow = players.filter((p) => p.alive);
       const aliveWolvesNow = aliveNow.filter((p) => isWerewolfTeam(p.role));
       const needsAINightPlan =
-        (aliveWolvesNow.length > 0 && aliveWolvesNow.every((w) => !w.isHuman)) ||
-        aliveNow.some((p) => (p.role === 'SEER' || p.role === 'BODYGUARD') && !p.isHuman);
+        (aliveWolvesNow.length > 0 && aliveWolvesNow.every((w) => isPlayerAIControlled(w))) ||
+        aliveNow.some((p) => (p.role === 'SEER' || p.role === 'BODYGUARD') && isPlayerAIControlled(p));
 
       if (needsAINightPlan) {
         try {
@@ -2411,9 +2486,17 @@ export default function App() {
         }
       }
 
+      const tempAIIds = new Set(
+        players.filter((p) => p.isHuman && (p as any).isTempAI).map((p) => p.id)
+      );
+      const playersForNightEngine =
+        tempAIIds.size > 0
+          ? players.map((p) => (tempAIIds.has(p.id) ? { ...p, isHuman: false } : p))
+          : players;
+
       const outcome = resolveNightPhase({
         nightNumber: dayCount,
-        players,
+        players: playersForNightEngine,
         humanActions: collectedHumanActions,
         aiNightPlan,
         doubleKillActive: wasDoubleKill,
@@ -2421,6 +2504,14 @@ export default function App() {
         bodyguardKnowledge,
         lastProtectedId,
       });
+
+      if (tempAIIds.size > 0) {
+        outcome.updatedPlayers = outcome.updatedPlayers.map((p) =>
+          tempAIIds.has(p.id)
+            ? ({ ...p, isHuman: true, isDisconnected: true, isTempAI: true } as Player)
+            : p
+        );
+      }
 
       const nextSeer = outcome.newSeerRecord
         ? [...seerKnowledge, outcome.newSeerRecord]
@@ -2939,7 +3030,7 @@ export default function App() {
 
       const triggerReasonPrefix =
         reason === 'TIMEOUT'
-          ? `⏰ ครบเวลาคุย 5 นาทีแล้ว! ตัดเข้าสู่คืนที่ ${nextNight}`
+          ? `⏰ ครบเวลา 60 วินาทีแล้ว! ระบบบังคับข้ามเข้าสู่คืนที่ ${nextNight} อัตโนมัติ`
           : `🌙 ทุกคนกดพร้อมครบแล้ว! เข้าสู่ยามวิกาล คืนที่ ${nextNight}`;
 
       const nightStartMsg: ChatMessage = {
@@ -3047,7 +3138,7 @@ export default function App() {
       phase === 'DAY_DISCUSSION' ? 'DAY_VOTING' : 'NIGHT_ACTION';
 
     const unreadyLivingAIs = players.filter(
-      (p) => p.alive && !p.isHuman && !phaseReadyIdsRef.current.includes(p.id)
+      (p) => p.alive && isPlayerAIControlled(p) && !phaseReadyIdsRef.current.includes(p.id)
     );
     if (unreadyLivingAIs.length === 0) return;
 
@@ -3102,12 +3193,14 @@ export default function App() {
         .map((m) => `${m.senderName}: ${m.text}`);
 
       const eligibleAI = players.filter(
-        (p) => p.alive && !p.isHuman && p.canVote
+        (p) => p.alive && isPlayerAIControlled(p) && p.canVote
       );
 
-      // Record all submitted human votes first (including explicit Abstain / ไม่โหวต)
+      // Record all submitted active human votes first (including explicit Abstain / ไม่โหวต)
       const humanVoteRecords: VoteRecord[] = [];
-      for (const hp of players.filter((p) => p.isHuman && p.alive && p.canVote)) {
+      for (const hp of players.filter(
+        (p) => p.isHuman && !(p as any).isTempAI && p.alive && p.canVote
+      )) {
         const tId = collectedHumanVotes[hp.id];
         if (!tId || tId === ABSTAIN_VOTE_ID) {
           humanVoteRecords.push({
@@ -3163,7 +3256,7 @@ export default function App() {
               const voter = players.find(
                 (p) => p.id === v.voterId || p.name.includes(v.voterId)
               );
-              if (!voter || voter.isHuman || !voter.alive || !voter.canVote) {
+              if (!voter || !isPlayerAIControlled(voter) || !voter.alive || !voter.canVote) {
                 continue;
               }
               if (v.targetId === ABSTAIN_VOTE_ID) {
@@ -4086,8 +4179,9 @@ export default function App() {
                             key={hp.id}
                             className="flex items-center gap-2 bg-slate-900/90 border border-slate-800 focus-within:border-amber-400 rounded-lg px-2.5 py-1.5"
                           >
-                            <span className="text-xs font-mono text-amber-400 font-bold w-6">
-                              #{idx + 1}
+                            <span className="text-xs font-mono text-amber-400 font-bold w-7 flex items-center gap-0.5 shrink-0">
+                              <span>#{idx + 1}</span>
+                              {isRoomHost && <span title="หัวหน้าห้อง">👑</span>}
                             </span>
                             <input
                               type="text"
@@ -4102,11 +4196,13 @@ export default function App() {
                             <span className="text-[10px] text-emerald-400 font-medium shrink-0">
                               {isMe
                                 ? isRoomHost
-                                  ? 'คุณ (หัวห้อง)'
+                                  ? '👑 คุณ (หัวห้อง)'
                                   : 'คุณ'
+                                : isRoomHost
+                                ? '👑 หัวห้อง'
                                 : hp.isOnline
                                 ? 'ออนไลน์'
-                                : 'เครื่องเดียวกัน'}
+                                : 'รอเชื่อมต่อ'}
                             </span>
                             {humanParticipants.length > 1 && isHost && !isMe && (
                               <button
@@ -4125,17 +4221,24 @@ export default function App() {
                   </div>
                 </div>
 
-                {/* Primary Start CTA */}
-                <button
-                  type="button"
-                  onClick={startNewRandomGame}
-                  className="w-full min-h-[48px] py-3.5 px-6 text-sm md:text-base font-bold text-slate-950 bg-amber-400 hover:bg-amber-300 active:scale-[0.99] rounded-xl shadow-[0_0_30px_rgba(245,158,11,0.35)] transition-all cursor-pointer flex items-center justify-center gap-2.5"
-                >
-                  <Play className="w-5 h-5 fill-current" />
-                  <span>
-                    สุ่มบทบาททั้งหมดและเริ่มเกม ({totalPlayerCount} ผู้เล่น)
-                  </span>
-                </button>
+                {/* Primary Start CTA (Host-Only) */}
+                {isHost ? (
+                  <button
+                    type="button"
+                    onClick={startNewRandomGame}
+                    className="w-full min-h-[48px] py-3.5 px-6 text-sm md:text-base font-bold text-slate-950 bg-amber-400 hover:bg-amber-300 active:scale-[0.99] rounded-xl shadow-[0_0_30px_rgba(245,158,11,0.35)] transition-all cursor-pointer flex items-center justify-center gap-2.5"
+                  >
+                    <Play className="w-5 h-5 fill-current" />
+                    <span>
+                      👑 เริ่มเกม · สุ่มบทบาททั้งหมด ({totalPlayerCount} ผู้เล่น)
+                    </span>
+                  </button>
+                ) : (
+                  <div className="w-full min-h-[48px] py-3.5 px-6 text-xs md:text-sm font-semibold text-amber-200 bg-slate-900/90 border border-amber-500/35 rounded-xl flex items-center justify-center gap-2 text-center">
+                    <Clock className="w-4 h-4 text-amber-400 animate-pulse shrink-0" />
+                    <span>รอหัวหน้าห้อง ({hostDisplayName}) กดเริ่มเกม...</span>
+                  </div>
+                )}
               </div>
             </div>
             {/* Compact Animation Preview Section (Start/Lobby Screen ONLY — completely hidden once game starts) */}
@@ -4406,16 +4509,32 @@ export default function App() {
                 <div className="text-xs md:text-sm text-amber-300 font-semibold font-mono tabular-nums truncate">
                   {phase === 'NIGHT_ACTION' && `คืนที่ ${dayCount} · ยามวิกาล`}
                   {phase === 'DAY_DISCUSSION' && `วันที่ ${dayCount} · ถกเถียง`}
-                  {phase === 'DAY_VOTING' && `วันที่ ${dayCount} · โหวตประหาร`}
+                  {phase === 'DAY_VOTING' && (
+                    <span className="inline-flex items-center gap-1.5">
+                      <span>วันที่ {dayCount}</span>
+                      <span
+                        className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md font-bold ${
+                          dayResultSecondsLeft <= 10
+                            ? 'bg-red-600/90 text-white animate-pulse'
+                            : 'bg-amber-500/20 text-amber-200 border border-amber-400/40'
+                        }`}
+                      >
+                        <span>⏳ เหลือเวลาโหวต: {formatCountdown(dayResultSecondsLeft)}</span>
+                      </span>
+                    </span>
+                  )}
                   {phase === 'DAY_RESULT' && (
                     <span className="inline-flex items-center gap-1.5">
                       <span>วันที่ {dayCount}</span>
-                      {dayResultSecondsLeft !== null && (
-                        <span className="inline-flex items-center gap-1 text-amber-200 font-bold">
-                          <Clock className="w-3 h-3" />
-                          <span>{formatCountdown(dayResultSecondsLeft)}</span>
-                        </span>
-                      )}
+                      <span
+                        className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md font-bold ${
+                          dayResultSecondsLeft <= 10
+                            ? 'bg-red-600/90 text-white animate-pulse'
+                            : 'bg-amber-500/20 text-amber-200 border border-amber-400/40'
+                        }`}
+                      >
+                        <span>⏳ เข้ากลางคืนใน: {formatCountdown(dayResultSecondsLeft)}</span>
+                      </span>
                     </span>
                   )}
                   {phase === 'GAME_OVER' && `จบเกม`}
@@ -4633,6 +4752,8 @@ export default function App() {
                                   ? 'ยาจก (งดโหวต)'
                                   : isCurrentViewer
                                   ? `คุณ (${ROLE_INFO[p.role].thaiName})`
+                                  : (p as any).isTempAI
+                                  ? '🤖 บอท AI เล่นแทน (เน็ตหลุด)'
                                   : !p.isHuman
                                   ? p.personaLabel
                                   : 'ผู้เล่นคนจริง'
@@ -5057,8 +5178,12 @@ export default function App() {
                             </div>
                           )}
                           {!isCurrentViewer && p.isHuman && (
-                            <div className="text-[10px] text-sky-300 font-semibold truncate">
-                              ผู้เล่นคนจริง
+                            <div
+                              className={`text-[10px] font-semibold truncate ${
+                                (p as any).isTempAI ? 'text-amber-300' : 'text-sky-300'
+                              }`}
+                            >
+                              {(p as any).isTempAI ? '🤖 AI เล่นแทนชั่วคราว' : 'ผู้เล่นคนจริง'}
                             </div>
                           )}
                           {isFellow && (
@@ -5646,9 +5771,20 @@ export default function App() {
                         </div>
                       ) : myPlayer.alive && myPlayer.canVote ? (
                         <>
-                          <p className="text-[11px] md:text-xs text-amber-300 font-semibold">
-                            เลือกโหวตประหาร 1 คน หรือเลือก &quot;งดออกเสียง&quot;:
-                          </p>
+                          <div className="flex items-center justify-between gap-2">
+                            <p className="text-[11px] md:text-xs text-amber-300 font-semibold">
+                              เลือกโหวตประหาร 1 คน หรือเลือก &quot;งดออกเสียง&quot;:
+                            </p>
+                            <span
+                              className={`shrink-0 text-[11px] font-mono font-bold px-2 py-0.5 rounded-md ${
+                                dayResultSecondsLeft <= 10
+                                  ? 'bg-red-600/90 text-white animate-pulse'
+                                  : 'bg-slate-800 text-amber-200 border border-amber-500/30'
+                              }`}
+                            >
+                              ⏳ {formatCountdown(dayResultSecondsLeft)}
+                            </span>
+                          </div>
                           <div className="flex md:flex-wrap gap-1.5 overflow-x-auto md:overflow-visible no-scrollbar pb-0.5 md:pb-0">
                             {players
                               .filter((p) => p.alive && p.id !== myPlayer.id)
@@ -6245,15 +6381,21 @@ export default function App() {
                 }}
                 className="px-4 py-2.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-xs font-semibold text-amber-300 cursor-pointer"
               >
-                ตั้งค่าห้อง / เปลี่ยนจำนวนคน
+                กลับสู่ห้องรอเล่น (Back to Lobby)
               </button>
-              <button
-                onClick={startNewRandomGame}
-                className="px-6 py-2.5 rounded-lg bg-amber-400 hover:bg-amber-300 text-xs md:text-sm font-bold text-slate-950 cursor-pointer flex items-center gap-2"
-              >
-                <RotateCcw className="w-4 h-4" />
-                <span>สุ่มบทบาทเล่นอีกครั้ง</span>
-              </button>
+              {isHost ? (
+                <button
+                  onClick={startNewRandomGame}
+                  className="px-6 py-2.5 rounded-lg bg-amber-400 hover:bg-amber-300 text-xs md:text-sm font-bold text-slate-950 cursor-pointer flex items-center gap-2"
+                >
+                  <RotateCcw className="w-4 h-4" />
+                  <span>👑 สุ่มบทบาทเล่นอีกครั้ง</span>
+                </button>
+              ) : (
+                <span className="px-4 py-2.5 rounded-lg bg-slate-900 border border-slate-700 text-xs text-slate-300">
+                  รอหัวหน้าห้อง ({hostDisplayName}) เริ่มเกมรอบใหม่...
+                </span>
+              )}
             </div>
           </div>
         </div>

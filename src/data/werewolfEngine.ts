@@ -195,8 +195,11 @@ export const VILLAGE_BACKDROP_IMAGE = villageBackdropImg;
 
 export interface HumanParticipant {
   id: string;
+  playerToken?: string;
   name: string;
   isOnline?: boolean;
+  isDisconnected?: boolean;
+  isTempAI?: boolean;
 }
 
 export interface AIArchetypeProfile {
@@ -360,9 +363,12 @@ export const FEMALE_THAI_NAMES: string[] = [
 
 export interface Player {
   id: string;
+  playerToken?: string;
   name: string;
   shortName: string;
   isHuman: boolean;
+  isDisconnected?: boolean;
+  isTempAI?: boolean;
   gender?: BotGender;
   archetypeId?: string;
   archetypeName?: string;
@@ -720,7 +726,7 @@ export function resolveNightPhase(params: {
   const killCount = doubleKillActive ? 2 : 1;
 
   const humanWolvesWithAction = aliveWolves.filter(
-    (w) => w.isHuman && humanActions[w.id]?.primary
+    (w) => w.isHuman && !w.isTempAI && humanActions[w.id]?.primary
   );
 
   if (humanWolvesWithAction.length > 0) {
@@ -784,9 +790,9 @@ export function resolveNightPhase(params: {
   const bodyguard = alive.find((p) => p.role === 'BODYGUARD');
 
   if (bodyguard) {
-    if (bodyguard.isHuman && humanActions[bodyguard.id]?.primary) {
+    if (bodyguard.isHuman && !bodyguard.isTempAI && humanActions[bodyguard.id]?.primary) {
       protectedId = humanActions[bodyguard.id].primary;
-    } else if (!bodyguard.isHuman) {
+    } else if (!bodyguard.isHuman || bodyguard.isTempAI) {
       const validTargets = alive.filter((p) => p.id !== lastProtectedId);
       const llmPick = aiNightPlan?.bodyguardTargetId;
       if (llmPick && validTargets.some((p) => p.id === llmPick)) {
@@ -823,9 +829,9 @@ export function resolveNightPhase(params: {
 
   if (seer) {
     let inspectId: string | null = null;
-    if (seer.isHuman && humanActions[seer.id]?.primary) {
+    if (seer.isHuman && !seer.isTempAI && humanActions[seer.id]?.primary) {
       inspectId = humanActions[seer.id].primary;
-    } else if (!seer.isHuman) {
+    } else if (!seer.isHuman || seer.isTempAI) {
       const validSeerTargets = alive.filter((p) => p.id !== seer.id);
       const llmPick = aiNightPlan?.seerTargetId;
       if (llmPick && validSeerTargets.some((p) => p.id === llmPick)) {
