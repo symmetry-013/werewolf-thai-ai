@@ -2259,12 +2259,13 @@ async function startServer() {
   // Helper to format rich player & game-state context for all autonomous LLM endpoints
   const formatPlayerProfileLine = (p: any) => {
     const genderThai = p.gender === "M" ? "ชาย" : p.gender === "F" ? "หญิง" : "ไม่ระบุเพศ";
-    const callPrefix = p.gender === "F" ? `อี${p.shortName || p.name}` : `ไอ้${p.shortName || p.name}`;
     const roleTag = `${p.role}${p.revealedBeggar ? " (เปิดการ์ดยาจกแล้ว - หมดสิทธิ์โหวต)" : ""}`;
     if (p.isHuman) {
-      return `- ID: ${p.id} | ชื่อ: ${p.name} (เรียกในวงว่า: ${callPrefix}) | ผู้เล่นคนจริง | บทบาทลับจริง: [${roleTag}]`;
+      return `- ID: ${p.id} | ชื่อ: ${p.name} | ผู้เล่นคนจริง | บทบาทลับจริง: [${roleTag}]`;
     }
-    return `- ID: ${p.id} | ชื่อ: ${p.name} (เพศ: ${genderThai}, เรียกในวงว่า: ${callPrefix}) | นิสัยเฉพาะตัว: [${p.archetypeName || p.personaLabel}] — ${p.personaTrait}${p.archetypeGuide ? ` | สไตล์การคิด/พูด: ${p.archetypeGuide}` : ""} | บทบาทลับจริง: [${roleTag}]`;
+    const sp = resolveBotSpeechProfile(p);
+    const styleTag = sp.politeness === "polite" ? "สุภาพ(ผม/ครับ หรือ หนู/ค่ะ/คะ)" : "เพื่อนสนิทสายห้าว(กู/มึง แยกใช้ห้ามเขียนติดกัน)";
+    return `- ID: ${p.id} | ชื่อ: ${p.name} (เพศ: ${genderThai}, อายุ: ${sp.age} ปี, ระดับภาษา: ${styleTag}) | นิสัยเฉพาะตัว: [${p.archetypeName || p.personaLabel}] — ${p.personaTrait} | บทบาทลับจริง: [${roleTag}]`;
   };
 
   const formatDeadPlayerLine = (p: any) => {
@@ -2318,10 +2319,113 @@ async function startServer() {
   const sleepMs = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
   const randomBotDelayMs = () => 4000 + Math.floor(Math.random() * 1001); // 4,000 - 5,000 ms
 
+  // =========================================================================
+  // Bot Speech Profile (Age 19-35, Gender, Politeness & Strict Thai Pronouns)
+  // =========================================================================
+
+  const POLITE_ARCHETYPES = new Set([
+    "M_DETECTIVE",
+    "M_MANIPULATOR",
+    "F_INNOCENT",
+    "F_OBSERVER",
+  ]);
+
+  const ARCHETYPE_AGE_RANGE: Record<string, [number, number]> = {
+    M_HOTHEAD: [21, 31],
+    M_TROLL: [19, 27],
+    M_DETECTIVE: [27, 35],
+    M_MANIPULATOR: [26, 34],
+    M_GAMBLER: [22, 33],
+    F_DRAMA: [20, 29],
+    F_ROASTER: [22, 32],
+    F_INNOCENT: [19, 23],
+    F_OBSERVER: [25, 34],
+    F_INSTIGATOR: [21, 30],
+  };
+
+  function hashSeed(input: string): number {
+    let h = 0;
+    for (let i = 0; i < input.length; i++) {
+      h = (h * 31 + input.charCodeAt(i)) >>> 0;
+    }
+    return h;
+  }
+
+  function resolveBotSpeechProfile(bot: any): {
+    gender: "M" | "F";
+    age: number;
+    politeness: "polite" | "casual";
+    archetypeId: string;
+  } {
+    const gender: "M" | "F" = bot?.gender === "F" ? "F" : "M";
+    const archetypeId =
+      typeof bot?.archetypeId === "string" && bot.archetypeId
+        ? bot.archetypeId
+        : gender === "F"
+        ? "F_INNOCENT"
+        : "M_DETECTIVE";
+    const politeness: "polite" | "casual" =
+      bot?.politeness === "polite" || bot?.politeness === "casual"
+        ? bot.politeness
+        : POLITE_ARCHETYPES.has(archetypeId)
+        ? "polite"
+        : "casual";
+
+    let age = Number(bot?.age);
+    if (!Number.isFinite(age) || age < 19 || age > 35) {
+      const [minAge, maxAge] = ARCHETYPE_AGE_RANGE[archetypeId] || [19, 35];
+      const seed = hashSeed(`${bot?.id || ""}:${bot?.name || ""}:${archetypeId}`);
+      age = minAge + (seed % (maxAge - minAge + 1));
+    }
+    return { gender, age, politeness, archetypeId };
+  }
+
+  function getEstimatedPlayerAge(p: any): number {
+    if (!p) return 25;
+    if (Number.isFinite(Number(p.age)) && Number(p.age) >= 18) return Number(p.age);
+    if (p.isHuman) return 25;
+    return resolveBotSpeechProfile(p).age;
+  }
+
+  // Format how `speakerBot` addresses `target` based on gender, age gap, and politeness
+  const formatAddressTarget = (speakerBot: any, target: any): string => {
+    const nick = String(target?.shortName || target?.name || "เพื่อน").replace(
+      /^(ไอ้|อี|พี่|น้อง|คุณ)/,
+      ""
+    );
+    const sp = resolveBotSpeechProfile(speakerBot);
+    const targetAge = getEstimatedPlayerAge(target);
+
+    if (sp.gender === "F" && sp.age < targetAge) {
+      return `พี่${nick}`;
+    }
+    if (sp.politeness === "polite") {
+      if (targetAge > sp.age + 1) return `พี่${nick}`;
+      if (sp.age > targetAge + 2) return `น้อง${nick}`;
+      return `คุณ${nick}`;
+    }
+    if (sp.age > targetAge + 3) {
+      return `ไอ้${nick}`;
+    }
+    return target?.gender === "F" ? `อี${nick}` : `ไอ้${nick}`;
+  };
+
+  // Determine natural self-pronoun for `speakerBot` relative to `target`
+  const getSelfPronoun = (speakerBot: any, target?: any): string => {
+    const sp = resolveBotSpeechProfile(speakerBot);
+    const targetAge = target ? getEstimatedPlayerAge(target) : 25;
+
+    if (sp.age > targetAge + 2) return "พี่";
+    if (sp.gender === "F" && sp.age < targetAge) return "หนู";
+    if (sp.politeness === "polite") {
+      return sp.gender === "F" ? "หนู" : "ผม";
+    }
+    return "กู";
+  };
+
   const formatThaiCall = (p: any): string => {
-    const nick = String(p?.shortName || p?.name || "มึง").replace(/^(ไอ้|อี)/, "");
-    if (p?.gender === "F") return `อี${nick}`;
-    return `ไอ้${nick}`;
+    const nick = String(p?.shortName || p?.name || "เพื่อน").replace(/^(ไอ้|อี)/, "");
+    return nick;
   };
 
   const formatChatClock = (): string => {
@@ -2334,146 +2438,159 @@ async function startServer() {
   const ROLE_THAI_SHORT: Record<string, string> = {
     WEREWOLF: "พ่อหมาป่า",
     WOLF_CUB: "ลูกหมาป่า",
-    HUMAN_WOLF: "หมาป่ามนุษย์(หมอดูส่องเห็นเป็นชาวบ้าน)",
-    SEER: "เทพพยากรณ์(หมอดู)",
+    HUMAN_WOLF: "หมาป่ามนุษย์(เซียร์ส่องเห็นเป็นชาวบ้าน)",
+    SEER: "เซียร์(เทพพยากรณ์)",
     BODYGUARD: "บอดี้การ์ด",
     BEGGAR: "ยาจก(โดนโหวตจะเปิดการ์ดรอด1ครั้ง)",
     VILLAGER: "ชาวบ้าน",
   };
 
-  // คลังประโยคสำรองตามบุคลิก (4 ชาย + 4 หญิง + 2 Wildcard) ใช้ทั้ง Hybrid Day 1 (0 Token) และ Fallback เมื่อ API ติด Limit
+  // คลังประโยคสำรองเฉพาะเรื่องเกมมนุษย์หมาป่า 100% แยกชัดเจนตามเพศ อายุ และระดับความสุภาพ
   const LOCAL_FALLBACK_BANK: Record<
     string,
-    { tone: string; day1: string[]; fallback: string[] }
+    { tone: string; politeness: "polite" | "casual"; day1: string[]; fallback: string[] }
   > = {
+    // --- กลุ่มสายห้าว / ปั่น / ปากแจ๋ว (Casual Banter) ---
     M_HOTHEAD: {
       tone: "หัวร้อน",
+      politeness: "casual",
       day1: [
-        "เห้ยเปิดมาก็เดือดเลยเหรอวะ {target} มึงทำหน้าลุกลี้ลุกลนทำไม พูดมา!",
-        "เอาจริงดิ ใครแม่งเงียบสุดในวงกูเล็งมึงก่อนเลยนะเว้ย โดยเฉพาะ {target}!",
-        "อย่ามัวลีลาพวกมึง ใครเป็นหมาป่าสารภาพมาเลย ไม่งั้นกูไล่บี้ {target} คนแรก!",
+        "เห้ยหมู่บ้านเพิ่งเปิดวันแรกก็เงียบกริบเลยเหรอวะ {target} ทำไมนิ่งผิดปกติ เป็นหมาป่าใช่ไหมพูดมา!",
+        "เอาจริงดิ ใครเงียบสุดในวง{self}เล็งก่อนเลยนะเว้ย โดยเฉพาะ {target} ลองอธิบายมาดิ๊!",
+        "อย่ามัวลีลาพวกเรา ใครเป็นหมาป่าสารภาพมาเลย ไม่งั้นรอบโหวตนี้{self}จี้ {target} คนแรกแน่!",
       ],
       fallback: [
-        "มึงพูดจาแปลกๆ นะ {target} ทำไมรีบโยนขี้จังวะ โคตรมีพิรุธเลยสัส!",
-        "กูไม่เชื่อขี้ปากมึงหรอก {target} เลิกแถแล้วตอบมาตรงๆ ดีกว่า!",
-        "เห้ยพวกมึงดู {target} ดิ แม่งเหลี่ยมจัด รอบนี้กูว่ามีกลิ่นหมาป่าชัวร์!",
+        "{target} พูดจาวกวนแปลกๆ นะ รีบโยนเป้าให้คนอื่นแบบนี้โคตรมีกลิ่นหมาป่าเลย!",
+        "{self}ไม่เชื่อคำแก้ตัวของ {target} หรอก รอบโหวตนี้ลองช่วยกันเพ่งเล็งมันหน่อยเหอะ!",
+        "เห้ยทุกคนดู {target} ดิ จังหวะพูดมันขัดกันเองชัดๆ รอบนี้{self}ว่ามีสิทธิ์เป็นหมาป่าสูงมาก!",
       ],
     },
     M_TROLL: {
       tone: "ปั่นวง",
+      politeness: "casual",
       day1: [
-        "5555 ตื่นกันยังพวกมึง กูว่าหน้าอย่าง {target} นี่แหละหมาป่าตัวพ่อเลย",
-        "เอ้าเริ่มเกมปุ๊บ กูขอแทงหวยใส่ {target} ก่อนเลยได้ปะ หน้ามึงดูเหลี่ยมๆ ว่ะ 555",
-        "วงนี้เงียบกริบเลยเว้ย สงสัย {target} กำลังคิดมุกโกหกอยู่ชัวร์ 5555",
+        "5555 ตื่นกันยังชาวบ้านทุกคน {self}ว่าทรงอย่าง {target} นี่แหละพ่อหมาป่าชัดๆ",
+        "เปิดวันแรกยังไม่มีผลเซียร์ งั้น{self}ขอโยนหินถามทางใส่ {target} ก่อนเลยได้ปะ หน้าดูเหลี่ยมๆ 555",
+        "วงเงียบมากเว้ย สงสัย {target} กำลังคิดแผนหลอกชาวบ้านอยู่ชัวร์ 5555",
       ],
       fallback: [
-        "เดี๋ยวๆ 5555 {target} มึงรนอะไรขนาดนั้นวะ หางโผล่แล้วมั้งเพื่อน!",
-        "กูฮาชิบหาย {target} แถจนสีข้างถลอกหมดแล้วมั้งมึงอ่ะ 555",
-        "เอาล่ะพวกมึง กูขอปั่นหน่อยเหอะ {target} แม่งโคตรน่าสงสัยเลยว่ะวันนี้!",
-      ],
-    },
-    M_DETECTIVE: {
-      tone: "จับพิรุธ",
-      day1: [
-        "ใจเย็นพวกมึง วันแรกยังไม่มีข้อมูลชัด แต่กูขอจับตาดู {target} ไว้ก่อนนะ",
-        "ลองดูจังหวะคนพูดในวงดีๆ ดิ ใครรีบเปิดก่อนหรือเงียบเกินอย่าง {target} น่าเช็กหมด",
-        "อย่าเพิ่งเดามั่ว ฟังเหตุผลทุกคนก่อน โดยเฉพาะ {target} มึงคิดยังไงว่ามาดิ๊",
-      ],
-      fallback: [
-        "กูไล่อ่านแชทดูแล้ว ตรรกะของ {target} แม่งแปลกๆ ว่ะ เหมือนพยายามเบี่ยงประเด็น",
-        "สังเกตปะ {target} ไม่ค่อยกล้าชี้ตัวใครเลย แบบนี้มีสิทธิ์เป็นหมาป่าเนียนๆ สูงมาก",
-        "เดี๋ยวลองเช็กคำพูด {target} อีกรอบดิ กูว่าข้อมูลมันขัดกันเองอยู่นะพวกมึง",
-      ],
-    },
-    M_MANIPULATOR: {
-      tone: "ปั่นเนียน",
-      day1: [
-        "กูว่าอย่าเพิ่งรีบโหวตมั่วเลยพวกมึง ลองฟัง {target} พูดก่อนดีกว่า เผื่อมีข้อมูลดีๆ",
-        "แปลกนะ เปิดวันแรกมาทำไมวงมันเงียบจัง {target} มึงดูนิ่งผิดปกติปะเนี่ย",
-        "พวกมึงคิดเหมือนกูปะ ว่าคนเงียบๆ อย่าง {target} นี่แหละชอบแอบซุ่มสุดละ",
-      ],
-      fallback: [
-        "กูไม่ได้จะปรักปรำนะ แต่ถ้ามองกลางๆ {target} ดูได้ประโยชน์สุดถ้าวงนี้แตกคอกัน",
-        "ลองคิดตามกูดิ {target} รีบปัดประเด็นหนีเร็วเกินไปปะ พวกมึงไม่เอะใจเหรอ?",
-        "กูว่าเราอย่าหลงกลคนเสียงดังเลย หันไปดูคนเนียนๆ อย่าง {target} ดีกว่าว่ะ",
+        "เดี๋ยวๆ 5555 {target} ทำไมดูร้อนตัวจังวะ หมาป่าหางโผล่แล้วมั้งเพื่อน!",
+        "{self}ขำเลย {target} รีบแก้ตัวไวเกินเหตุ แบบนี้เซียร์ช่วยส่องให้ทีเหอะคืนนี้ 555",
+        "เอาล่ะหมู่บ้านนี้ต้องมีคนเนียน {self}ขอปักธงสงสัย {target} ไว้ก่อนเลยรอบโหวตนี้!",
       ],
     },
     M_GAMBLER: {
       tone: "สายเสี่ยง",
+      politeness: "casual",
       day1: [
-        "วันแรกมันต้องวัดดวงเว้ย! กูขอเปิดหน้าท้า {target} เลย กล้าสาบานปะว่าไม่ใช่หมา?",
-        "ไม่รู้แหละ กูเชื่อเซนส์ตัวเอง รอบนี้ {target} มีรังสีอำมหิตแปลกๆ ว่ะ 555",
-        "ใครเงียบกูทุบหมดอ่ะบอกเลย เริ่มจาก {target} ก่อนเป็นไงพวกมึง!",
+        "วันแรกมันต้องวัดใจเว้ย! {self}ขอเปิดหน้าท้า {target} เลย กล้ายืนยันไหมว่าอยู่ฝั่งชาวบ้าน?",
+        "ไม่รู้แหละ {self}เชื่อเซนส์ตัวเอง รอบนี้ {target} ดูมีพิรุธกว่าเพื่อนในหมู่บ้านเลย 555",
+        "ใครเงียบเกินไป{self}ขอจี้ก่อนเลย เริ่มจาก {target} ก่อนเป็นไง คิดว่าใครคือหมาป่า?",
       ],
       fallback: [
-        "กูเทหมดหน้าตักเลยรอบนี้ ถ้า {target} ไม่ใช่หมาป่าให้กูเลี้ยงข้าวเลยเอ้า!",
-        "เอาวะวัดใจกันไปเลย พวกมึงลองจี้ {target} ดูดิ เดี๋ยวก็มีหลุด!",
-        "เซนส์กูมันร้องเตือนดังมากว่า {target} กำลังตอแหลอยู่ชัวร์!",
+        "{self}เทหมดหน้าตักเลยรอบนี้ ถ้า {target} ไม่ใช่หมาป่านี่แปลกมาก ลองดูจังหวะโหวตมันดิ!",
+        "เอาวะวัดใจกันไปเลย ลองกดดัน {target} ดูหน่อย เผื่อหมาป่าจะหลุดพิรุธออกมา!",
+        "เซนส์{self}มันเตือนแรงมากว่า {target} กำลังปั่นให้ชาวบ้านโหวตผิดตัวชัวร์!",
       ],
     },
     F_DRAMA: {
       tone: "ดราม่า",
+      politeness: "casual",
       day1: [
-        "กรี๊ดดด เปิดเกมมาก็ขนลุกแล้วอ่ะพวกมึง อย่าบอกนะว่า {target} เป็นหมาป่าอ่ะ?!",
-        "เห้ยพวกมึงกูกลัวนะเนี่ย! ทำไม {target} ทำตัวมีพิรุธตั้งแต่วันแรกเลยวะ!",
-        "โอ๊ยยย วงนี้ไว้ใจใครไม่ได้เลยสักคน โดยเฉพาะ {target} หน้าตึงมากมึง!",
+        "โอ๊ยย เปิดเช้าวันแรกในหมู่บ้านก็ขนลุกแล้วอ่ะ อย่าบอกนะว่า {target} เป็นหมาป่าอ่ะ?!",
+        "เห้ยระแวงไปหมดแล้วเนี่ย ทำไม {target} เงียบผิดปกติตั้งแต่วันแรกเลยล่ะ!",
+        "หมู่บ้านนี้ไว้ใจใครไม่ได้เลยสักคน โดยเฉพาะ {target} ดูมีพิรุธสุดๆ!",
       ],
       fallback: [
-        "ว้ายยย {target} มึงพูดแบบนี้หมายความว่าไงวะ จะโยนความผิดให้คนอื่นเหรอ?!",
-        "ไม่จริงอ่ะ! กูว่า {target} แม่งโคตรน่าสงสัยเลยพวกมึง อย่าไปหลงเชื่อมันนะ!",
-        "โอ๊ยปวดหัวกับวงนี้มาก {target} มึงเลิกตอแหลแล้วพูดความจริงมาเดี๋ยวนี้!",
+        "ว้าย {target} พูดแบบนี้หมายความว่าไง จะโยนความผิดให้ชาวบ้านคนอื่นเหรอ?!",
+        "ไม่น่าใช่แล้วนะ! {self}ว่า {target} โคตรน่าสงสัยเลย ทุกคนอย่าเพิ่งหลงเชื่อคำพูดมันนะ!",
+        "ปวดหัวกับวงโหวตนี้มาก {target} บอกมาตรงๆ เลยดีกว่าว่าเมื่อคืนทำอะไรอยู่!",
       ],
     },
     F_ROASTER: {
       tone: "ปากแซ่บ",
+      politeness: "casual",
       day1: [
-        "แหมมม ตื่นมาก็ทำตัวเนียนเลยนะ {target} อย่าคิดว่ากูดูไม่ออกนะจ๊ะ",
-        "เปิดวันแรกมาก็เงียบเป็นเป่าสากเลยพวกมึง โดยเฉพาะ {target} อมอะไรไว้คายออกมา!",
-        "สภาพแต่ละคนโคตรมีพิรุธ โดยเฉพาะ {target} แกล้งทำเป็นใสซื่อเหรอมึง 555",
+        "แหม ตื่นมาก็ทำตัวเนียนเลยนะ {target} อย่าคิดว่าชาวบ้านดูไม่ออกนะจ๊ะ",
+        "เปิดวันแรกมาก็เงียบเป็นเป่าสากเลย โดยเฉพาะ {target} มีความลับอะไรคายออกมาซะดีๆ!",
+        "ทรงแต่ละคนโคตรน่าสงสัย โดยเฉพาะ {target} แกล้งทำเป็นชาวบ้านใสซื่อเหรอ 555",
       ],
       fallback: [
-        "โห {target} แถเก่งขนาดนี้ไปเป็นทนายเถอะมึง ตอแหลไม่เนียนเลยสักนิด!",
-        "หยุดเลย {target} ยิ่งแก้ตัวยิ่งดูเหมือนหมาป่าจนมุมว่ะ พวกมึงดูมันดิ!",
-        "ขำว่ะ {target} คิดว่าพูดแค่นี้แล้วคนในวงจะเชื่อเหรอ ฝันไปเถอะมึง!",
-      ],
-    },
-    F_INNOCENT: {
-      tone: "สายเนียน",
-      day1: [
-        "เห้ยพวกมึง กูเพิ่งตื่นยังงงอยู่เลยอ่ะ {target} มึงว่าใครน่าสงสัยสุดวะ?",
-        "อย่าเพิ่งรุมกูนะเว้ย กูชาวบ้านใสๆ จริงๆ แต่กูแอบกลัว {target} ยังไงไม่รู้อ่ะ",
-        "วันแรกยังเดาไม่ออกเลยอ่ะพวกมึง ลองถาม {target} ดูก่อนมั้ยว่าคิดไง?",
-      ],
-      fallback: [
-        "เดี๋ยวนะ กูงงไปหมดแล้วอ่ะ แต่ทำไม {target} ดูรีบจังเลยวะ กูแอบระแวงนะเนี่ย",
-        "กูไม่ได้อยากหาเรื่องใครนะ แต่เมื่อกี้ {target} พูดแปลกจริงพวกมึง ลองดูดีๆ ดิ",
-        "เห้ยอย่าเพิ่งโหวตมั่วดิ กูว่าลองฟัง {target} อธิบายก่อนมั้ยมันดูลุกลนแปลกๆ",
-      ],
-    },
-    F_OBSERVER: {
-      tone: "จับโป๊ะ",
-      day1: [
-        "กูนั่งดูเงียบๆ อยู่นะ แต่เห็นชัดเลยว่า {target} ดูเกร็งผิดปกติตั้งแต่วันแรก",
-        "ใครพูดน้อยเกินหรือพูดมากเกินกูจดหมดแหละ โดยเฉพาะ {target} ระวังตัวไว้",
-        "เปิดเกมมาแบบนี้จับจังหวะง่ายดีนะ {target} มึงลองพูดอะไรหน่อยดิ เงียบทำไม",
-      ],
-      fallback: [
-        "จับโป๊ะได้จุดนึงละ {target} เปลี่ยนเรื่องไวมากเวลาโดนถามจี้ แบบนี้ไม่ปกติชัวร์",
-        "กูสังเกตมาสองรอบละ {target} ชอบไหลตามน้ำไม่ยอมออกความเห็นเอง หมาป่าชัดๆ",
-        "ดูทรงแล้ว {target} พยายามเบี่ยงเป้าอยู่นะพวกมึง อย่าเพิ่งหลุดโฟกัส",
+        "โห {target} แถเก่งขนาดนี้ ยิ่งแก้ตัวยิ่งดูเหมือนหมาป่าจนมุมนะ ทุกคนลองอ่านแชทมันดีๆ ดิ!",
+        "หยุดเลย {target} อย่ามาเบี่ยงประเด็น รอบโหวตนี้{self}จับตาดูอยู่ตลอดนะ!",
+        "ขำว่ะ {target} คิดว่าโยนเป้าให้คนอื่นแล้วชาวบ้านจะไม่สงสัยตัวเองเหรอ!",
       ],
     },
     F_INSTIGATOR: {
       tone: "สายเสี้ยม",
+      politeness: "casual",
       day1: [
-        "อุ๊ยยย พวกมึงเห็นปะเมื่อกี้ {target} แอบมองแรงอ่ะ สงสัยกลัวโดนจับได้ปะเนี่ย 555",
-        "เอาจริงนะ กูว่าวงนี้ต้องมีคนแอบแทงข้างหลังแน่ๆ กูเล็ง {target} ไว้ก่อนเลย!",
-        "ลองโยนหินถามทางหน่อยดิ ถ้าวันนี้ลองโหวต {target} จะมีใครรีบออกตัวปกป้องมั้ยน้า~",
+        "อุ๊ย ทุกคนเห็นปะเมื่อกี้ {target} ดูเกร็งแปลกๆ สงสัยกลัวโดนเซียร์ส่องเจอปะเนี่ย 555",
+        "เอาจริงนะ {self}ว่าในหมู่บ้านนี้มีคนแอบเนียนแน่ๆ ขอเล็ง {target} ไว้ก่อนเลย!",
+        "ลองโยนหินถามทางหน่อยดิ ถ้าวันนี้ลองโหวต {target} จะมีหมาป่าตัวอื่นรีบออกตัวปกป้องไหมน้า~",
       ],
       fallback: [
-        "เอ๊ะ ทำไม {target} ดูร้อนตัวจังวะ หรือว่าโดนจี้ถูกจุดเข้าให้แล้วอ่ะพวกมึง 555",
-        "พวกมึงสังเกตปะ เวลาใครแตะ {target} มันรีบเปลี่ยนเรื่องทันทีเลย น่าคิดนะเว้ย!",
-        "กูเชียร์ให้จี้ {target} ต่อเลย ดูซิว่าจะแถไปได้อีกกี่น้ำ!",
+        "เอ๊ะ ทำไม {target} ดูร้อนตัวจัง หรือว่าโดนจี้ถูกจุดหมาป่าเข้าให้แล้ว 555",
+        "สังเกตปะ เวลาใครแตะชื่อ {target} มันรีบเปลี่ยนเรื่องทันทีเลย น่าคิดนะทุกคน!",
+        "{self}เชียร์ให้จี้ {target} ต่อเลย ดูซิว่าจะหาข้ออ้างมาแก้ตัวยังไง!",
+      ],
+    },
+
+    // --- กลุ่มสุภาพ / นิสัยดี / วิเคราะห์มีมารยาท / แอ๊บใส (Polite Persona) ---
+    M_DETECTIVE: {
+      tone: "วิเคราะห์สุภาพ",
+      politeness: "polite",
+      day1: [
+        "ใจเย็นๆ นะครับทุกคน วันแรกเรายังไม่มีข้อมูลจากเซียร์มากนัก แต่{self}ขอสังเกตท่าทีของ {target} ไว้ก่อนครับ",
+        "ลองดูจังหวะการพูดในหมู่บ้านกันดีๆ นะครับ อย่าง {target} คิดว่าเมื่อคืนหมาป่าเล็งใครเพราะอะไรครับ?",
+        "อย่าเพิ่งรีบโหวตมั่วกันเลยครับ เดี๋ยวพลาดโดนชาวบ้านหรือยาจก ลองฟังความเห็นของ {target} ดูก่อนครับ",
+      ],
+      fallback: [
+        "{self}ลองไล่อ่านประวัติแชทแล้ว คำพูดของ {target} ดูขัดแย้งกันอยู่นิดหน่อยนะครับ น่าตรวจสอบเพิ่มครับ",
+        "จากข้อมูลที่มีตอนนี้ {target} ยังไม่ค่อยกล้าฟันธงใครเลย {self}มองว่ามีโอกาสเป็นหมาป่าที่พยายามเนียนครับ",
+        "ถ้าเซียร์หรือบอดี้การ์ดมีเบาะแส ลองส่งสัญญาณช่วยหมู่บ้านหน่อยนะครับ ตอนนี้{self}แอบสงสัย {target} อยู่ครับ",
+      ],
+    },
+    M_MANIPULATOR: {
+      tone: "สุภาพใจเย็น",
+      politeness: "polite",
+      day1: [
+        "{self}ว่าเราค่อยๆ คุยกันอย่างมีเหตุผลดีกว่าครับ อย่าเพิ่งแตกคอกันเอง ลองฟัง {target} พูดก่อนไหมครับ?",
+        "บรรยากาศในหมู่บ้านวันนี้ดูเงียบแปลกๆ นะครับ {target} ดูนิ่งผิดปกติ คิดเห็นยังไงบ้างครับ?",
+        "ทุกคนคิดเหมือน{self}ไหมครับ ว่าคนที่เงียบๆ อย่าง {target} บางทีอาจกำลังซุ่มดูท่าทีอยู่ก็ได้นะครับ",
+      ],
+      fallback: [
+        "{self}ไม่ได้อยากปรักปรำใครนะครับ แต่ถ้ามองตามรูปเกม {target} ดูน่าสงสัยที่สุดในจังหวะนี้ครับ",
+        "ลองสังเกตดีๆ นะครับ {target} รีบเปลี่ยนประเด็นไวเกินไปหน่อย เหมือนไม่อยากให้วงโฟกัสเรื่องหมาป่าครับ",
+        "{self}ว่าเราอย่าเพิ่งหลงตามกระแสเลยครับ หันมาเช็กความน่าเชื่อถือของ {target} ดูอีกทีน่าจะปลอดภัยกว่าครับ",
+      ],
+    },
+    F_INNOCENT: {
+      tone: "สุภาพใสซื่อ",
+      politeness: "polite",
+      day1: [
+        "เอ่อ {self}เพิ่งตื่นยังจับต้นชนปลายไม่ถูกเลยค่ะ {target} คิดว่าใครในหมู่บ้านดูเหมือนหมาป่าคะ?",
+        "อย่าเพิ่งสงสัย{self}เลยนะคะ {self}เป็นชาวบ้านจริงๆ ค่ะ แต่แอบรู้สึกว่า {target} ดูเงียบแปลกๆ นะคะ",
+        "วันแรกยังเดาไม่ออกเลยค่ะว่าใครเป็นหมาป่า ลองถาม {target} ดูก่อนดีไหมคะว่ามีเบาะแสอะไรบ้าง?",
+      ],
+      fallback: [
+        "เดี๋ยวนะคะ {self}เริ่มงงแล้ว แต่ทำไม {target} ดูรีบเร่งโหวตจังเลยคะ {self}แอบระแวงนิดหน่อยค่ะ",
+        "{self}ไม่ได้อยากกล่าวหาใครนะคะ แต่เมื่อกี้คำพูดของ {target} ดูแปลกๆ จริงๆ ค่ะ ลองช่วยกันดูหน่อยนะคะ",
+        "อย่าเพิ่งรีบโหวตพลาดโดนชาวบ้านนะคะ {self}ว่าลองให้ {target} อธิบายเหตุผลเพิ่มอีกนิดดีไหมคะ?",
+      ],
+    },
+    F_OBSERVER: {
+      tone: "สังเกตสุภาพ",
+      politeness: "polite",
+      day1: [
+        "{self}นั่งอ่านเงียบๆ อยู่นะคะ แต่สังเกตเห็นว่า {target} ดูเกร็งผิดปกติตั้งแต่วันแรกเลยค่ะ",
+        "ใครพูดน้อยเกินหรือรีบเปิดประเด็นเกิน{self}จดไว้หมดค่ะ โดยเฉพาะ {target} ลองแชร์มุมมองหน่อยได้ไหมคะ?",
+        "เปิดเกมวันแรกแบบนี้ดูจังหวะง่ายดีค่ะ {target} มองว่าเหตุการณ์เมื่อคืนในหมู่บ้านเป็นยังไงบ้างคะ?",
+      ],
+      fallback: [
+        "{self}สังเกตเห็นจุดน่าสงสัยค่ะ {target} เปลี่ยนเรื่องไวมากเวลาโดนถามจี้ แบบนี้ไม่น่าใช่ชาวบ้านธรรมดาค่ะ",
+        "{self}ดูพฤติกรรมมาหลายจังหวะแล้ว {target} ชอบไหลตามน้ำไม่ยอมออกความเห็นเอง น่าสงสัยมากค่ะ",
+        "ดูทรงแล้ว {target} พยายามเบี่ยงเป้าโหวตอยู่นะคะ ทุกคนอย่าเพิ่งหลุดโฟกัสจากประเด็นหมาป่าค่ะ",
       ],
     },
   };
@@ -2486,40 +2603,57 @@ async function startServer() {
     usedTexts: Set<string>;
   }): { text: string; tone: string } {
     const { bot, players, isDay1Opening, nightVictimNames, usedTexts } = params;
-    const archKey =
-      bot.archetypeId && LOCAL_FALLBACK_BANK[bot.archetypeId]
-        ? bot.archetypeId
-        : bot.gender === "F"
-        ? "F_ROASTER"
-        : "M_TROLL";
-    const bank = LOCAL_FALLBACK_BANK[archKey] || LOCAL_FALLBACK_BANK.M_TROLL;
+    const sp = resolveBotSpeechProfile(bot);
+    const bank =
+      LOCAL_FALLBACK_BANK[sp.archetypeId] ||
+      (sp.gender === "F" ? LOCAL_FALLBACK_BANK.F_INNOCENT : LOCAL_FALLBACK_BANK.M_DETECTIVE);
     const pool = isDay1Opening ? bank.day1 : bank.fallback;
 
     const othersAlive = players.filter((p: any) => p.alive && p.id !== bot.id);
-    const randomTarget =
+    const pickedTarget =
       othersAlive.length > 0
-        ? formatThaiCall(othersAlive[Math.floor(Math.random() * othersAlive.length)])
-        : "พวกมึง";
+        ? othersAlive[Math.floor(Math.random() * othersAlive.length)]
+        : null;
+
+    const targetCall = pickedTarget
+      ? formatAddressTarget(bot, pickedTarget)
+      : sp.politeness === "polite"
+      ? "ทุกคน"
+      : "พวกเรา";
+    const selfPronoun = getSelfPronoun(bot, pickedTarget || undefined);
+
+    const renderTemplate = (tpl: string) =>
+      tpl.replace(/\{target\}/g, targetCall).replace(/\{self\}/g, selfPronoun);
 
     const candidates = pool
-      .map((tpl) => tpl.replace(/\{target\}/g, randomTarget))
+      .map(renderTemplate)
       .filter((txt) => !usedTexts.has(txt));
 
     let chosen =
       candidates.length > 0
         ? candidates[Math.floor(Math.random() * candidates.length)]
-        : pool[Math.floor(Math.random() * pool.length)].replace(/\{target\}/g, randomTarget);
+        : renderTemplate(pool[Math.floor(Math.random() * pool.length)]);
 
-    if (isDay1Opening && Array.isArray(nightVictimNames) && nightVictimNames.length > 0 && Math.random() < 0.45) {
+    if (
+      isDay1Opening &&
+      Array.isArray(nightVictimNames) &&
+      nightVictimNames.length > 0 &&
+      Math.random() < 0.45
+    ) {
       const deadShort = nightVictimNames[0].replace(/\s*\(.*\)$/, "");
-      chosen = `เชี่ย ${deadShort} ปลิวตั้งแต่คืนแรกเลยเหรอวะ! ${chosen}`;
+      if (sp.politeness === "polite") {
+        const ending = sp.gender === "F" ? "เลยนะคะ" : "เลยนะครับ";
+        chosen = `ตกใจมากเลย ${deadShort} โดนหมาป่าเล่นงานตั้งแต่คืนแรก${ending} ${chosen}`;
+      } else {
+        chosen = `เชี่ย ${deadShort} โดนหมาป่าเก็บตั้งแต่คืนแรกเลยเหรอวะ! ${chosen}`;
+      }
     }
 
     usedTexts.add(chosen);
     return { text: chosen, tone: bank.tone };
   }
 
-  // Ultra-Compact Prompt (~500 tokens max per single-bot API call)
+  // Ultra-Compact Prompt with Strict Thai Pronoun/Age/Politeness Rules & Game Context Lock
   function buildUltraCompactBotPrompt(params: {
     bot: any;
     dayNumber: number;
@@ -2546,53 +2680,87 @@ async function startServer() {
       mode,
     } = params;
 
-    const aliveNames = players
+    const sp = resolveBotSpeechProfile(bot);
+    const botGenderThai = sp.gender === "F" ? "หญิง" : "ชาย";
+    const botNick = String(bot.shortName || bot.name || "ผู้เล่น");
+
+    // List alive players with age so bot knows who is older (พี่) or younger
+    const aliveList = players
       .filter((p: any) => p.alive)
-      .map((p: any) => formatThaiCall(p))
-      .join(",");
+      .map((p: any) => `${p.shortName || p.name}(${getEstimatedPlayerAge(p)}ปี)`)
+      .join(", ");
     // Strictly NO roles of dead players!
     const deadNamesOnly =
       players
         .filter((p: any) => !p.alive)
         .map((p: any) => p.shortName || p.name)
-        .join(",") || "ไม่มี";
+        .join(", ") || "ไม่มี";
     const revealedBeggarName =
       players
         .filter((p: any) => p.revealedBeggar)
         .map((p: any) => p.shortName || p.name)
-        .join(",") || "ไม่มี";
+        .join(", ") || "ไม่มี";
 
-    const tableStatusLine = `วันที่:${dayNumber} | รอด:${aliveNames} | ตาย:${deadNamesOnly} | เปิดการ์ดยาจก:${revealedBeggarName}`;
+    const tableStatusLine = `วันที่:${dayNumber} | ผู้รอดชีวิต:${aliveList} | คนตาย:${deadNamesOnly} | เปิดการ์ดยาจก:${revealedBeggarName}`;
 
     // Private skill intel ONLY for this specific bot (1 concise line)
-    let privateIntel = "ไม่มีข้อมูลลับเพิ่ม";
+    let privateIntel = "ไม่มีข้อมูลลับเพิ่มเติม";
     if (isWolfRole(bot.role)) {
       const partners = players
         .filter((p: any) => p.id !== bot.id && isWolfRole(p.role))
-        .map((p: any) => `${formatThaiCall(p)}(${p.alive ? "รอด" : "ตาย"})`)
-        .join(",");
-      privateIntel = `ฝูงหมาป่า:${partners || "เหลือมึงตัวเดียว"} ห้ามแฉพวกเดียวกัน ให้เนียนป้ายสีชาวบ้าน`;
+        .map((p: any) => `${p.shortName || p.name}(${p.alive ? "รอด" : "ตาย"})`)
+        .join(", ");
+      privateIntel = `เพื่อนร่วมฝูงหมาป่า:${partners || "เหลือคุณตัวเดียว"} ห้ามแฉพวกเดียวกัน ให้เนียนป้ายสีชาวบ้าน`;
     } else if (bot.role === "SEER") {
       const checks = (seerKnowledge || [])
         .slice(-3)
-        .map((k: any) => `${k.targetName}=${k.isWerewolf ? "หมาป่า!" : "คนดี"}`)
+        .map((k: any) => `${k.targetName}=${k.isWerewolf ? "หมาป่า!" : "ชาวบ้าน"}`)
         .join(", ");
-      privateIntel = checks ? `ผลส่องหมอดู:${checks} (เลือกซ่อนตัวหรือแฉเองได้)` : "ยังไม่มีผลส่อง";
+      privateIntel = checks
+        ? `ผลส่องเซียร์:${checks} (เลือกซ่อนตัวหรือเปิดเผยช่วยหมู่บ้านได้)`
+        : "ยังไม่มีผลส่อง";
     } else if (bot.role === "BODYGUARD") {
       const saves = (bodyguardKnowledge || [])
         .slice(-3)
-        .map((k: any) => `คืน${k.night}:${k.targetName}${k.savedAttack ? "(เซฟติด!)" : ""}`)
+        .map((k: any) => `คืน${k.night}:${k.targetName}${k.savedAttack ? "(เซฟรอด!)" : ""}`)
         .join(", ");
-      privateIntel = saves ? `ประวัติการ์ด:${saves}` : "ยังไม่เคยเซฟใคร";
+      privateIntel = saves ? `ประวัติบอดี้การ์ด:${saves}` : "ยังไม่เคยคุ้มกันใคร";
     }
 
-    const botGender = bot.gender === "F" ? "หญิง" : "ชาย";
+    // Build Strict Thai Pronoun & Politeness Rule tailored to this exact bot
+    let pronounRule = "";
+    if (sp.politeness === "polite") {
+      if (sp.gender === "M") {
+        pronounRule =
+          `ระดับภาษา: สุภาพ น่าเชื่อถือ (Polite) — แทนตัวเองว่า "ผม" (หรือ "พี่" เมื่อพูดกับคนที่อายุน้อยกว่า ${sp.age} ปี) ` +
+          `และลงท้ายประโยคด้วย "ครับ" เสมอ เรียกคนที่อายุมากกว่าว่า "พี่[ชื่อ]" ห้ามใช้คำหยาบเด็ดขาด`;
+      } else {
+        pronounRule =
+          `ระดับภาษา: สุภาพ นอบน้อม (Polite) — แทนตัวเองว่า "หนู" หรือ "ฉัน" (หรือ "พี่" เมื่อพูดกับคนที่อายุน้อยกว่า ${sp.age} ปี) ` +
+          `เรียกคนที่อายุมากกว่า ${sp.age} ปีว่า "พี่[ชื่อ]" (เช่น พี่เต้, พี่มิ้นท์) ` +
+          `ลงท้ายให้ถูกหลักภาษาไทย: ประโยคคำถามลงท้าย "คะ" ประโยคบอกเล่าลงท้าย "ค่ะ" ห้ามใช้คำหยาบเด็ดขาด`;
+      }
+    } else {
+      if (sp.gender === "F") {
+        pronounRule =
+          `ระดับภาษา: เพื่อนสนิทสายห้าว/ปั่น (Casual) — แทนตัวเองว่า "กู" (หรือ "หนู" เมื่อคุยกับคนที่อายุมากกว่า ${sp.age} ปี และเรียกเขาว่า "พี่[ชื่อ]", หรือแทนตัวเองว่า "พี่" กับคนอายุน้อยกว่า) ` +
+          `เวลาเรียกเพื่อนรุ่นเดียวกันใช้คำว่า "มึง" หรือ "ไอ้[ชื่อ]/อี[ชื่อ]" ได้อย่างเป็นธรรมชาติ ` +
+          `ห้ามพิมพ์คำว่า กู กับ มึง ติดกันเป็นคำเดียวเด็ดขาด!`;
+      } else {
+        pronounRule =
+          `ระดับภาษา: เพื่อนสนิทสายห้าว/กวน (Casual) — แทนตัวเองว่า "กู" (หรือ "พี่" เมื่อพูดกับคนที่อายุน้อยกว่า ${sp.age} ปี) ` +
+          `เวลาเรียกเพื่อนใช้คำว่า "มึง" หรือ "ไอ้[ชื่อ]/อี[ชื่อ]" ให้ถูกบริบท ` +
+          `ห้ามพิมพ์คำว่า กู กับ มึง ติดกันเป็นคำเดียวเด็ดขาด!`;
+      }
+    }
+
     const botRoleThai = ROLE_THAI_SHORT[bot.role] || "ชาวบ้าน";
-    const botPersona = `${bot.archetypeName || bot.personaLabel || "เพื่อนซี้"} (${(bot.personaTrait || "").slice(0, 60)})`;
+    const botPersona = `${bot.archetypeName || bot.personaLabel || "ชาวบ้าน"} (${(bot.personaTrait || "").slice(0, 60)})`;
 
     const botProfileBlock =
-      `ตัวมึง:${formatThaiCall(bot)}(${botGender}) | บทลับ:${botRoleThai} | นิสัย:${botPersona}\n` +
-      `ข้อมูลลับเฉพาะมึง:${privateIntel}`;
+      `ตัวตนของคุณ: ${botNick} (เพศ${botGenderThai}, อายุ ${sp.age} ปี) | บทบาทลับ:${botRoleThai} | นิสัย:${botPersona}\n` +
+      `${pronounRule}\n` +
+      `ข้อมูลลับเฉพาะตัว:${privateIntel}`;
 
     // Strictly last 8-10 messages only!
     const compactHistory = (recentTranscript || [])
@@ -2601,25 +2769,27 @@ async function startServer() {
       .join("\n");
 
     const systemPrompt =
-      `มึงคือผู้เล่นเกม Werewolf ในแชทกลุ่มเพื่อนซี้คนไทย สวมบทเป็น ${formatThaiCall(bot)} เท่านั้น\n` +
-      `กฎเหล็ก: ตอบภาษาเพื่อนสนิทดิบๆ กู-มึง ไอ้/อี แซวแรง ปั่นประสาท ห้ามมีคำสุภาพ(ครับ/ค่ะ/คุณ/ผม/ฉัน)เด็ดขาด! ` +
-      `พิมพ์แค่คำพูดของมึงสั้นๆ 1-2 ประโยค ห้ามใส่ชื่อนำหน้า ห้ามใส่เครื่องหมายคำพูด`;
+      `คุณคือผู้เล่นชื่อ "${botNick}" (เพศ${botGenderThai} อายุ ${sp.age} ปี) ในเกม "ล่าปริศนามนุษย์หมาป่า (Ultimate Werewolf)" เท่านั้น\n` +
+      `กฎเหล็กด้านบริบท: ห้ามหลุดบริบทไปพูดเรื่องอื่นนอกเกมเด็ดขาด (ห้ามพูดถึงห้องพัก โรงแรม คดีฆาตกรรมในโรงแรม หรือสถานที่อื่นที่ไม่มีในเกม) ` +
+      `ให้คุยวิเคราะห์เฉพาะเรื่องหมู่บ้าน, หมาป่า, การโหวตประหาร, คนตายเมื่อคืน, บอดี้การ์ด, เซียร์ (เทพพยากรณ์) และยาจกเท่านั้น\n` +
+      `กฎเหล็กด้านภาษา: ${pronounRule}\n` +
+      `รูปแบบคำตอบ: พิมพ์เฉพาะคำพูดสั้นๆ 1-2 ประโยคที่เป็นธรรมชาติ ห้ามใส่ชื่อนำหน้า ห้ามใส่เครื่องหมายคำพูด ห้ามทวนคำสั่งหรือคำอธิบายจาก Prompt`;
 
-    let triggerNote = "เปิดวงถกเถียงต่อจากแชทล่าสุดให้ตรงนิสัยมึง";
+    let triggerNote = "เปิดวงวิเคราะห์ต่อจากแชทล่าสุดให้ตรงนิสัยและระดับภาษาของคุณ";
     if (mode === "REPLY_TO_HUMAN" && humanMessage) {
-      triggerNote = `ล่าสุด ${speakerName || "เพื่อน"} พิมพ์ว่า "${String(humanMessage).slice(0, 120)}" ให้มึงโต้ตอบหรือสวนกลับตามนิสัย`;
+      triggerNote = `ล่าสุด ${speakerName || "เพื่อน"} พิมพ์ว่า "${String(humanMessage).slice(0, 120)}" ให้คุณโต้ตอบให้ตรงบริบทเกมหมาป่าและระดับภาษาของคุณ`;
     } else if (mode === "INITIAL_DAY") {
       triggerNote =
         nightVictimNames && nightVictimNames.length > 0
-          ? `เมื่อคืน ${nightVictimNames.join(",")} โดนหมาป่าฆ่า! ออกความเห็นสั้นๆ`
-          : "เมื่อคืนไม่มีใครตาย (บอดี้การ์ดเซฟได้)! ออกความเห็นสั้นๆ";
+          ? `เมื่อคืน ${nightVictimNames.join(", ")} โดนหมาป่าสังหารในหมู่บ้าน! ออกความเห็นสั้นๆ`
+          : "เมื่อคืนไม่มีใครตายในหมู่บ้าน (บอดี้การ์ดคุ้มกันสำเร็จ)! ออกความเห็นสั้นๆ";
     }
 
     const userPrompt =
       `${tableStatusLine}\n` +
       `${botProfileBlock}\n` +
-      `แชทล่าสุด:\n${compactHistory || "(เพิ่งเปิดวง)"}\n` +
-      `คำสั่ง:${triggerNote} (ตอบสั้น 1-2 ประโยคภาษา กู-มึง เท่านั้น)`;
+      `แชทล่าสุดในสภาหมู่บ้าน:\n${compactHistory || "(เพิ่งเปิดวงวันแรก)"}\n` +
+      `คำสั่ง:${triggerNote} (ตอบสั้น 1-2 ประโยค ให้อยู่ในเกมมนุษย์หมาป่าเท่านั้น)`;
 
     return { systemPrompt, userPrompt };
   }
@@ -2642,8 +2812,10 @@ async function startServer() {
     // Strip leading speaker name prefix like "ไอ้บอส: ..." or "บอส:"
     const shortName = String(bot?.shortName || bot?.name || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
     if (shortName) {
-      cleaned = cleaned.replace(new RegExp(`^(?:ไอ้|อี)?${shortName}\\s*[:：-]\\s*`, "i"), "");
+      cleaned = cleaned.replace(new RegExp(`^(?:ไอ้|อี|พี่|น้อง|คุณ)?${shortName}\\s*[:：-]\\s*`, "i"), "");
     }
+    // Guard: never allow leaked prompt artifact "กู-มึง" / "กู/มึง"
+    cleaned = cleaned.replace(/กู\s*[-–—/]\s*มึง/g, "เรา").trim();
     cleaned = cleaned.replace(/^["'「『]+|["'」』]+$/g, "").replace(/\s+/g, " ").trim();
     // Keep strictly concise (1-2 sentences / max ~220 Thai chars)
     if (cleaned.length > 220) {
@@ -3281,7 +3453,7 @@ async function startServer() {
 4. เทพพยากรณ์ (SEER): รู้ผลส่อง (${JSON.stringify(seerKnowledge)}) — ถ้าส่องเจอใครเป็นหมาป่าให้โหวตคนนั้นทันที และหลีกเลี่ยงโหวตคนที่ส่องเห็นเป็นชาวบ้าน (ห้ามโกงรู้ตัวจริงของ HUMAN_WOLF ถ้าผลส่องเป็น false)
 5. บอดี้การ์ด (BODYGUARD): ใช้ข้อมูลคนที่คุ้มกัน (${JSON.stringify(bodyguardKnowledge)}) ประกอบการตัดสินใจ
 6. ถ้าบอทตัวไหนลังเลหรือข้อมูลไม่พอจริงๆ สามารถเลือกไม่โหวตโดยส่ง targetId เป็น "__ABSTAIN__" ได้
-7. เหตุผลการโหวต (reason) ต้องเขียนสดๆ 1 ประโยคสั้นๆ ให้ตรงกับเพศและนิสัยเฉพาะตัวของบอทตัวนั้นๆ ใช้ภาษาแก๊งเพื่อนสนิท "กู-มึง / ไอ้... / อี..." ห้ามมีคำสุภาพ (ห้ามมี ครับ/ค่ะ/คุณ/ผม/ฉัน/นะครับ เด็ดขาด!)`;
+7. เหตุผลการโหวต (reason) ต้องเขียนสดๆ 1 ประโยคสั้นๆ ให้ตรงกับเพศและนิสัยเฉพาะตัวของบอทตัวนั้นๆ ใช้ภาษาตรงตามเพศ อายุ และระดับความสุภาพของบอทแต่ละตัว (บอทสุภาพใช้ ผม/ครับ หรือ หนู/ค่ะ/คะ ส่วนบอทสายห้าวใช้คำว่า กู แทนตัวและ มึง แทนคู่สนทนา ห้ามพิมพ์คำว่า กู กับ มึง ติดกันเด็ดขาด และคุยเฉพาะเรื่องเกมมนุษย์หมาป่าเท่านั้น)`;
 
       const userPrompt = `=== กลางวันวันที่ ${dayNumber} — ลงมติโหวตประหาร ===
 ผู้เล่นที่ยังมีชีวิตอยู่:
@@ -3510,7 +3682,7 @@ ${(recentTranscript || []).slice(-18).join("\n")}
       const systemPrompt = `คุณคือ "${aiWolf.name}" (เพศ: ${aiGenderThai} | นิสัยเฉพาะตัว: ${aiWolf.archetypeName || aiWolf.personaLabel} — ${aiWolf.personaTrait}) รับบทบาทลับ "${aiWolfThaiRole}" กำลังกระซิบวางแผนฆ่าเหยื่อแบบลับเฉพาะ 2 คนกับเพื่อนร่วมฝูงหมาป่า "${humanWolfName}" (ชาวบ้านไม่มีทางเห็นแชทนี้)
 กฎเหล็ก:
 1. คิดวิเคราะห์เลือกเหยื่อเองอย่างมีเหตุผลตามบทสนทนาในสภา (เช่น ใครพูดคมน่าจะเป็นหมอดู/บอดี้การ์ด ใครปากดีน่าเก็บก่อน) และพูดคุยให้ตรงกับเพศและนิสัยเฉพาะตัวของ "${aiWolf.name}"
-2. ใช้ภาษาเพื่อนสนิท "กู-มึง" แบบดิบๆ กวนๆ สั้นกระชับ 1-2 ประโยค ห้ามมีคำสุภาพเด็ดขาด (ห้ามมี ครับ/ค่ะ/คุณ/ผม/ฉัน/นะครับ)!
+2. ใช้ภาษาให้ตรงตามเพศ อายุ และระดับความสุภาพของตัวละคร สั้นกระชับ 1-2 ประโยค คุยเฉพาะเรื่องการล่าเหยื่อในหมู่บ้านเกมมนุษย์หมาป่าเท่านั้น (ห้ามพิมพ์คำว่า กู กับ มึง ติดกันเด็ดขาด)
 3. การสังหารต้องตกลงเลือกเหยื่อคนเดียวกัน (suggestedTargetId ต้องเป็น ID ของเหยื่อฝั่งชาวบ้านที่ยังมีชีวิตอยู่ในรายชื่อเท่านั้น ห้ามเลือกหมาป่าด้วยกัน)
 4. ถ้า "${humanWolfName}" ส่งซิกเลือกเหยื่อหรือเสนอชื่อมาแล้ว ส่วนใหญ่ให้ตกลงตามเพื่อนหรือแสดงความเห็นสั้นๆ แล้วส่งซิกให้ตรงกันเพื่อล็อกเป้าได้ไว`;
 
@@ -3547,7 +3719,7 @@ ${modeInstruction}`;
           },
           required: ["text", "suggestedTargetId"],
         },
-        jsonHint: `{ "text": "ข้อความกระซิบสดๆ 1-2 ประโยคภาษา กู-มึง", "suggestedTargetId": "id ของเหยื่อฝั่งชาวบ้าน" }`,
+        jsonHint: `{ "text": "ข้อความกระซิบวางแผนล่าเหยื่อในหมู่บ้าน 1-2 ประโยค", "suggestedTargetId": "id ของเหยื่อฝั่งชาวบ้าน" }`,
       });
 
       return res.json({

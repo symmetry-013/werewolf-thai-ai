@@ -69,6 +69,7 @@ export type PhaseType =
   | 'GAME_OVER';
 
 export type BotGender = 'M' | 'F';
+export type BotPoliteness = 'polite' | 'casual';
 
 export const ABSTAIN_VOTE_ID = '__ABSTAIN__';
 
@@ -205,6 +206,8 @@ export interface HumanParticipant {
 export interface AIArchetypeProfile {
   id: string;
   gender: BotGender;
+  politeness: BotPoliteness;
+  ageRange: [number, number];
   thaiLabel: string;
   englishTitle: string;
   avatarColor: string;
@@ -217,16 +220,20 @@ export const MALE_ARCHETYPES: AIArchetypeProfile[] = [
   {
     id: 'M_HOTHEAD',
     gender: 'M',
+    politeness: 'casual',
+    ageRange: [21, 31],
     thaiLabel: 'สายบวกหัวร้อน',
     englishTitle: 'The Aggressive Hothead',
     avatarColor: '#EF4444',
     personaTrait: 'ใจร้อน เสียงดัง ด่วนสรุป ชอบเปิดบวกจี้คนเงียบก่อนใคร',
     behaviorGuide:
-      'Impatient, loud, hot-headed Thai male friend. Jumps to conclusions quickly, hates silent players, aggressively points fingers and shouts accusations in raw กู-มึง slang. If accused, erupts defensively and immediately counter-accuses.',
+      'Impatient, loud, hot-headed Thai male friend. Jumps to conclusions quickly, hates silent players, aggressively points fingers and shouts accusations in raw casual close-friend slang. If accused, erupts defensively and immediately counter-accuses.',
   },
   {
     id: 'M_TROLL',
     gender: 'M',
+    politeness: 'casual',
+    ageRange: [19, 27],
     thaiLabel: 'สายปั่นขี้แกล้ง',
     englishTitle: 'The Chaotic Troll',
     avatarColor: '#F97316',
@@ -237,6 +244,8 @@ export const MALE_ARCHETYPES: AIArchetypeProfile[] = [
   {
     id: 'M_DETECTIVE',
     gender: 'M',
+    politeness: 'polite',
+    ageRange: [27, 35],
     thaiLabel: 'สายวิเคราะห์จริงจัง',
     englishTitle: 'The Cold Detective',
     avatarColor: '#38BDF8',
@@ -247,6 +256,8 @@ export const MALE_ARCHETYPES: AIArchetypeProfile[] = [
   {
     id: 'M_MANIPULATOR',
     gender: 'M',
+    politeness: 'polite',
+    ageRange: [26, 34],
     thaiLabel: 'สายเนียนหน้านิ่ง',
     englishTitle: 'The Calm Manipulator',
     avatarColor: '#14B8A6',
@@ -261,6 +272,8 @@ export const FEMALE_ARCHETYPES: AIArchetypeProfile[] = [
   {
     id: 'F_DRAMA',
     gender: 'F',
+    politeness: 'casual',
+    ageRange: [20, 29],
     thaiLabel: 'สายโวยวายขี้ระแวง',
     englishTitle: 'The Paranoid Drama Queen',
     avatarColor: '#EC4899',
@@ -271,6 +284,8 @@ export const FEMALE_ARCHETYPES: AIArchetypeProfile[] = [
   {
     id: 'F_ROASTER',
     gender: 'F',
+    politeness: 'casual',
+    ageRange: [22, 32],
     thaiLabel: 'สายปากแจ๋วตอกกลับแรง',
     englishTitle: 'The Sassy Roaster',
     avatarColor: '#A855F7',
@@ -281,16 +296,20 @@ export const FEMALE_ARCHETYPES: AIArchetypeProfile[] = [
   {
     id: 'F_INNOCENT',
     gender: 'F',
+    politeness: 'polite',
+    ageRange: [19, 23],
     thaiLabel: 'สายแอ๊บใสซื่อ',
     englishTitle: 'The Innocent Actor',
     avatarColor: '#F59E0B',
     personaTrait: 'ชอบทำหน้างงๆ แกล้งใสซื่อหลบเป้าสงสัย บลัฟฟ์เนียนมากเวลาได้เป็นหมาป่า',
     behaviorGuide:
-      'Clever Thai female who acts confused, sleepy, and totally innocent to deflect suspicion. As a Werewolf she bluffs effortlessly behind cute/confused excuses while still using raw close-friend กู-มึง slang.',
+      'Clever Thai female who acts confused, sleepy, and totally innocent to deflect suspicion. As a Werewolf she bluffs effortlessly behind cute/confused excuses while still using raw close-friend casual close-friend slang.',
   },
   {
     id: 'F_OBSERVER',
     gender: 'F',
+    politeness: 'polite',
+    ageRange: [25, 34],
     thaiLabel: 'สายสังเกตจับผิดเก่ง',
     englishTitle: 'The Sharp Observer',
     avatarColor: '#8B5CF6',
@@ -304,16 +323,20 @@ export const BONUS_WILDCARD_ARCHETYPES: AIArchetypeProfile[] = [
   {
     id: 'M_GAMBLER',
     gender: 'M',
+    politeness: 'casual',
+    ageRange: [22, 33],
     thaiLabel: 'สายเดือดแทงสวน',
     englishTitle: 'The Wildcard Gambler',
     avatarColor: '#10B981',
     personaTrait: 'ชอบแทงสวนกระแสวง เชื่อสัญชาตญาณตัวเอง กล้าเปิดประเด็นวัดใจ',
     behaviorGuide:
-      'Bold, contrarian Thai male friend who hates sheep voting, loves challenging the loudest accuser, trusts gut instinct, and makes risky high-stakes calls in raw กู-มึง banter.',
+      'Bold, contrarian Thai male friend who hates sheep voting, loves challenging the loudest accuser, trusts gut instinct, and makes risky high-stakes calls in raw casual close-friend banter.',
   },
   {
     id: 'F_INSTIGATOR',
     gender: 'F',
+    politeness: 'casual',
+    ageRange: [21, 30],
     thaiLabel: 'สายขี้เสี้ยมปั่นวง',
     englishTitle: 'The Sharp Instigator',
     avatarColor: '#F43F5E',
@@ -370,6 +393,8 @@ export interface Player {
   isDisconnected?: boolean;
   isTempAI?: boolean;
   gender?: BotGender;
+  age?: number;
+  politeness?: BotPoliteness;
   archetypeId?: string;
   archetypeName?: string;
   archetypeGuide?: string;
@@ -548,11 +573,16 @@ function generateDynamicAIBots(
       ? maleNameQueue[mIdx++] || `บอส${idx + 1}`
       : femaleNameQueue[fIdx++] || `มิ้นท์${idx + 1}`;
 
+    const [minAge, maxAge] = archetype.ageRange;
+    const randomAge = minAge + Math.floor(Math.random() * (maxAge - minAge + 1));
+
     return {
       id: `ai-${idx + 1}`,
       name: pickedName,
       shortName: pickedName,
       gender: archetype.gender,
+      age: randomAge,
+      politeness: archetype.politeness,
       archetype,
     };
   });
@@ -587,6 +617,8 @@ export function createInitialPlayers(params?: {
     shortName: string;
     isHuman: boolean;
     gender?: BotGender;
+    age?: number;
+    politeness?: BotPoliteness;
     archetypeId?: string;
     archetypeName?: string;
     archetypeGuide?: string;
@@ -612,6 +644,8 @@ export function createInitialPlayers(params?: {
       shortName: bot.shortName,
       isHuman: false,
       gender: bot.gender,
+      age: bot.age,
+      politeness: bot.politeness,
       archetypeId: bot.archetype.id,
       archetypeName: `${bot.archetype.thaiLabel} (${bot.archetype.englishTitle})`,
       archetypeGuide: bot.archetype.behaviorGuide,
@@ -629,6 +663,8 @@ export function createInitialPlayers(params?: {
       shortName: entry.shortName,
       isHuman: entry.isHuman,
       gender: entry.gender,
+      age: entry.age,
+      politeness: entry.politeness,
       archetypeId: entry.archetypeId,
       archetypeName: entry.archetypeName,
       archetypeGuide: entry.archetypeGuide,
